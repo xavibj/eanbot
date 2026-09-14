@@ -1,0 +1,771 @@
+package store
+
+import (
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func openTestStore(t *testing.T) *Store {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eanbot.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+	return s
+}
+
+func mustCreateCrawl(t *testing.T, s *Store, seed string) *Crawl {
+	t.Helper()
+	c, err := s.CreateCrawl(seed, json.RawMessage(`{"seed":"`+seed+`"}`))
+	if err != nil {
+		t.Fatalf("CreateCrawl(%q) error = %v", seed, err)
+	}
+	return c
+}
+
+// --- Open / schema ---
+
+func TestOpen_SchemaIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eanbot.db")
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	if _, err := s1.CreateCrawl("https://example.com", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("CreateCrawl() error = %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open() error = %v", err)
+	}
+	defer s2.Close()
+
+	crawls, err := s2.ListCrawls()
+	if err != nil {
+		t.Fatalf("ListCrawls() error = %v", err)
+	}
+	if len(crawls) != 1 {
+		t.Fatalf("expected 1 crawl surviving reopen, got %d", len(crawls))
+	}
+}
+
+func TestOpen_RunningCrawlBecomesFailed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eanbot.db")
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	c := mustCreateCrawl(t, s1, "https://example.com")
+	if c.Status != "running" {
+		t.Fatalf("expected new crawl to be running, got %q", c.Status)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen Open() error = %v", err)
+	}
+	defer s2.Close()
+
+	got, err := s2.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.Status != "failed" {
+		t.Errorf("Status = %q, want failed", got.Status)
+	}
+	if got.Error != "interrumpido" {
+		t.Errorf("Error = %q, want interrumpido", got.Error)
+	}
+	if got.FinishedAt == nil {
+		t.Errorf("FinishedAt = nil, want non-nil")
+	}
+}
+
+// --- CreateCrawl / GetCrawl / ListCrawls ---
+
+func TestCreateCrawl_GetCrawl(t *testing.T) {
+	s := openTestStore(t)
+
+	cfg := json.RawMessage(`{"seed":"https://example.com","max_pages":10}`)
+	before := time.Now().UTC()
+	c, err := s.CreateCrawl("https://example.com", cfg)
+	if err != nil {
+		t.Fatalf("CreateCrawl() error = %v", err)
+	}
+	after := time.Now().UTC()
+
+	if c.ID == 0 {
+		t.Errorf("ID = 0, want non-zero")
+	}
+	if c.Seed != "https://example.com" {
+		t.Errorf("Seed = %q", c.Seed)
+	}
+	if c.Status != "running" {
+		t.Errorf("Status = %q, want running", c.Status)
+	}
+	if string(c.Config) != string(cfg) {
+		t.Errorf("Config = %s, want %s", c.Config, cfg)
+	}
+	if c.StartedAt.Before(before.Add(-time.Second)) || c.StartedAt.After(after.Add(time.Second)) {
+		t.Errorf("StartedAt = %v, want between %v and %v", c.StartedAt, before, after)
+	}
+	if c.FinishedAt != nil {
+		t.Errorf("FinishedAt = %v, want nil", c.FinishedAt)
+	}
+	if c.PagesCount != 0 {
+		t.Errorf("PagesCount = %d, want 0", c.PagesCount)
+	}
+
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.ID != c.ID || got.Seed != c.Seed || got.Status != c.Status {
+		t.Errorf("GetCrawl() = %+v, want %+v", got, c)
+	}
+}
+
+func TestGetCrawl_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.GetCrawl(999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListCrawls_MostRecentFirst(t *testing.T) {
+	s := openTestStore(t)
+
+	c1 := mustCreateCrawl(t, s, "https://a.example.com")
+	c2 := mustCreateCrawl(t, s, "https://b.example.com")
+	c3 := mustCreateCrawl(t, s, "https://c.example.com")
+
+	got, err := s.ListCrawls()
+	if err != nil {
+		t.Fatalf("ListCrawls() error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	wantOrder := []int64{c3.ID, c2.ID, c1.ID}
+	for i, id := range wantOrder {
+		if got[i].ID != id {
+			t.Errorf("got[%d].ID = %d, want %d", i, got[i].ID, id)
+		}
+	}
+}
+
+// --- SetRobots ---
+
+func TestSetRobots(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	if err := s.SetRobots(c.ID, "User-agent: *\nDisallow: /admin"); err != nil {
+		t.Fatalf("SetRobots() error = %v", err)
+	}
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.RobotsTxt != "User-agent: *\nDisallow: /admin" {
+		t.Errorf("RobotsTxt = %q", got.RobotsTxt)
+	}
+}
+
+func TestSetRobots_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	err := s.SetRobots(999, "x")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- FinishCrawl ---
+
+func TestFinishCrawl_States(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		errMsg string
+	}{
+		{"done", "done", ""},
+		{"failed", "failed", "boom"},
+		{"cancelled", "cancelled", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			c := mustCreateCrawl(t, s, "https://example.com")
+
+			if err := s.FinishCrawl(c.ID, tt.status, tt.errMsg); err != nil {
+				t.Fatalf("FinishCrawl() error = %v", err)
+			}
+			got, err := s.GetCrawl(c.ID)
+			if err != nil {
+				t.Fatalf("GetCrawl() error = %v", err)
+			}
+			if got.Status != tt.status {
+				t.Errorf("Status = %q, want %q", got.Status, tt.status)
+			}
+			if got.Error != tt.errMsg {
+				t.Errorf("Error = %q, want %q", got.Error, tt.errMsg)
+			}
+			if got.FinishedAt == nil {
+				t.Errorf("FinishedAt = nil, want set")
+			}
+		})
+	}
+}
+
+func TestFinishCrawl_Idempotent(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	if err := s.FinishCrawl(c.ID, "done", ""); err != nil {
+		t.Fatalf("first FinishCrawl() error = %v", err)
+	}
+	first, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+
+	// A second FinishCrawl on a non-running crawl must be a no-op, no error.
+	if err := s.FinishCrawl(c.ID, "failed", "otro error"); err != nil {
+		t.Fatalf("second FinishCrawl() error = %v", err)
+	}
+	second, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if second.Status != first.Status || second.Error != first.Error {
+		t.Errorf("crawl changed on second FinishCrawl: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestFinishCrawl_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	err := s.FinishCrawl(999, "done", "")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- DeleteCrawl ---
+
+func TestDeleteCrawl_Cascade(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	page := Page{
+		CrawlID:   c.ID,
+		URL:       "https://example.com/",
+		Depth:     0,
+		Status:    200,
+		FetchedAt: time.Now().UTC(),
+	}
+	links := []Link{{ToURL: "https://example.com/a", Text: "a"}}
+	pageID, err := s.AddPage(page, links)
+	if err != nil {
+		t.Fatalf("AddPage() error = %v", err)
+	}
+
+	if err := s.DeleteCrawl(c.ID); err != nil {
+		t.Fatalf("DeleteCrawl() error = %v", err)
+	}
+
+	if _, err := s.GetCrawl(c.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetCrawl() after delete err = %v, want ErrNotFound", err)
+	}
+
+	var pageCount, linkCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pages WHERE crawl_id = ?`, c.ID).Scan(&pageCount); err != nil {
+		t.Fatalf("count pages error = %v", err)
+	}
+	if pageCount != 0 {
+		t.Errorf("pageCount = %d, want 0", pageCount)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM links WHERE crawl_id = ?`, c.ID).Scan(&linkCount); err != nil {
+		t.Fatalf("count links error = %v", err)
+	}
+	if linkCount != 0 {
+		t.Errorf("linkCount = %d, want 0", linkCount)
+	}
+	_ = pageID
+}
+
+func TestDeleteCrawl_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	err := s.DeleteCrawl(999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- AddPage / GetPage / FindPageByURL ---
+
+func TestAddPage_IncrementsPagesCount(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	p1 := Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: time.Now().UTC()}
+	if _, err := s.AddPage(p1, nil); err != nil {
+		t.Fatalf("AddPage() error = %v", err)
+	}
+	p2 := Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, FetchedAt: time.Now().UTC()}
+	if _, err := s.AddPage(p2, nil); err != nil {
+		t.Fatalf("AddPage() error = %v", err)
+	}
+
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.PagesCount != 2 {
+		t.Errorf("PagesCount = %d, want 2", got.PagesCount)
+	}
+}
+
+func TestAddPage_DuplicateURLRejected(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	p := Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: time.Now().UTC()}
+	if _, err := s.AddPage(p, nil); err != nil {
+		t.Fatalf("first AddPage() error = %v", err)
+	}
+	if _, err := s.AddPage(p, nil); err == nil {
+		t.Errorf("second AddPage() with duplicate URL error = nil, want error")
+	}
+
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.PagesCount != 1 {
+		t.Errorf("PagesCount = %d, want 1 (rejected insert must not increment)", got.PagesCount)
+	}
+}
+
+func TestGetPage_OutAndInLinks(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	home := Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: time.Now().UTC()}
+	homeID, err := s.AddPage(home, []Link{
+		{ToURL: "https://example.com/a", Text: "A", InScope: true},
+		{ToURL: "https://example.com/b", Text: "B", NoFollow: true, InScope: true},
+	})
+	if err != nil {
+		t.Fatalf("AddPage(home) error = %v", err)
+	}
+
+	pageA := Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, FetchedAt: time.Now().UTC()}
+	pageAID, err := s.AddPage(pageA, []Link{
+		{ToURL: "https://example.com/", Text: "home", InScope: true},
+	})
+	if err != nil {
+		t.Fatalf("AddPage(a) error = %v", err)
+	}
+
+	gotPage, out, in, err := s.GetPage(c.ID, homeID)
+	if err != nil {
+		t.Fatalf("GetPage(home) error = %v", err)
+	}
+	if gotPage.URL != home.URL {
+		t.Errorf("URL = %q", gotPage.URL)
+	}
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	if len(in) != 1 {
+		t.Fatalf("len(in) = %d, want 1", len(in))
+	}
+	if in[0].FromURL != pageA.URL {
+		t.Errorf("in[0].FromURL = %q, want %q", in[0].FromURL, pageA.URL)
+	}
+	if in[0].FromPageID != pageAID {
+		t.Errorf("in[0].FromPageID = %d, want %d", in[0].FromPageID, pageAID)
+	}
+}
+
+func TestGetPage_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	_, _, _, err := s.GetPage(c.ID, 999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestFindPageByURL(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	p := Page{CrawlID: c.ID, URL: "https://example.com/x", Status: 200, FetchedAt: time.Now().UTC()}
+	id, err := s.AddPage(p, nil)
+	if err != nil {
+		t.Fatalf("AddPage() error = %v", err)
+	}
+
+	got, err := s.FindPageByURL(c.ID, "https://example.com/x")
+	if err != nil {
+		t.Fatalf("FindPageByURL() error = %v", err)
+	}
+	if got.ID != id {
+		t.Errorf("ID = %d, want %d", got.ID, id)
+	}
+}
+
+func TestFindPageByURL_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	_, err := s.FindPageByURL(c.ID, "https://example.com/missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- ListPages ---
+
+func seedListPagesCrawl(t *testing.T, s *Store) int64 {
+	t.Helper()
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+	pages := []Page{
+		{CrawlID: c.ID, URL: "https://example.com/", Status: 200, Title: "Home", FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/redirect", Status: 301, Title: "Redirect", FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/missing", Status: 404, Title: "Not Found", FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/broken", Status: 500, Title: "Server Error", FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/error", Status: 0, Blocked: false, Error: "timeout", FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/blocked", Status: 0, Blocked: true, FetchedAt: now},
+	}
+	for _, p := range pages {
+		if _, err := s.AddPage(p, nil); err != nil {
+			t.Fatalf("AddPage(%s) error = %v", p.URL, err)
+		}
+	}
+	return c.ID
+}
+
+func TestListPages_StatusFilters(t *testing.T) {
+	tests := []struct {
+		status  string
+		wantLen int
+	}{
+		{"", 6},
+		{"2xx", 1},
+		{"3xx", 1},
+		{"4xx", 1},
+		{"5xx", 1},
+		{"error", 1},
+		{"blocked", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			s := openTestStore(t)
+			crawlID := seedListPagesCrawl(t, s)
+
+			got, total, err := s.ListPages(crawlID, PageFilter{Status: tt.status})
+			if err != nil {
+				t.Fatalf("ListPages() error = %v", err)
+			}
+			if len(got) != tt.wantLen {
+				t.Errorf("len = %d, want %d", len(got), tt.wantLen)
+			}
+			if total != tt.wantLen {
+				t.Errorf("total = %d, want %d", total, tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestListPages_InvalidStatus(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedListPagesCrawl(t, s)
+	_, _, err := s.ListPages(crawlID, PageFilter{Status: "6xx"})
+	if err == nil {
+		t.Errorf("err = nil, want error for invalid status")
+	}
+}
+
+func TestListPages_Query(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedListPagesCrawl(t, s)
+
+	got, total, err := s.ListPages(crawlID, PageFilter{Query: "redirect"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 1 || len(got) != 1 {
+		t.Fatalf("total=%d len=%d, want 1", total, len(got))
+	}
+	if got[0].URL != "https://example.com/redirect" {
+		t.Errorf("URL = %q", got[0].URL)
+	}
+
+	// Query matches title too.
+	got, total, err = s.ListPages(crawlID, PageFilter{Query: "Home"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 1 || len(got) != 1 {
+		t.Fatalf("total=%d len=%d, want 1", total, len(got))
+	}
+}
+
+func TestListPages_QueryEscapesWildcards(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+	pages := []Page{
+		{CrawlID: c.ID, URL: "https://example.com/100%off", Status: 200, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/normal", Status: 200, FetchedAt: now},
+	}
+	for _, p := range pages {
+		if _, err := s.AddPage(p, nil); err != nil {
+			t.Fatalf("AddPage() error = %v", err)
+		}
+	}
+
+	got, total, err := s.ListPages(c.ID, PageFilter{Query: "100%off"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 1 || len(got) != 1 {
+		t.Fatalf("total=%d len=%d, want 1 (literal %% must not act as wildcard)", total, len(got))
+	}
+}
+
+func TestListPages_LimitOffset(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+	for i := 0; i < 5; i++ {
+		p := Page{CrawlID: c.ID, URL: "https://example.com/" + string(rune('a'+i)), Status: 200, FetchedAt: now}
+		if _, err := s.AddPage(p, nil); err != nil {
+			t.Fatalf("AddPage() error = %v", err)
+		}
+	}
+
+	got, total, err := s.ListPages(c.ID, PageFilter{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 5 {
+		t.Errorf("total = %d, want 5", total)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	// Ordered by id: skip first, take next two.
+	if got[0].URL != "https://example.com/b" || got[1].URL != "https://example.com/c" {
+		t.Errorf("got URLs = %q, %q", got[0].URL, got[1].URL)
+	}
+}
+
+func TestListPages_DefaultAndMaxLimit(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+	p := Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}
+	if _, err := s.AddPage(p, nil); err != nil {
+		t.Fatalf("AddPage() error = %v", err)
+	}
+
+	// Limit 0 -> default 100 (not asserted directly, just must not error and
+	// must return all rows). Limit above 1000 -> capped.
+	_, _, err := s.ListPages(c.ID, PageFilter{Limit: 0})
+	if err != nil {
+		t.Fatalf("ListPages(limit=0) error = %v", err)
+	}
+	_, _, err = s.ListPages(c.ID, PageFilter{Limit: 5000})
+	if err != nil {
+		t.Fatalf("ListPages(limit=5000) error = %v", err)
+	}
+}
+
+// --- Summarize ---
+
+func TestSummarize(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	pages := []Page{
+		{CrawlID: c.ID, URL: "https://example.com/", Status: 200, ContentType: "text/html", DurationMs: 100, Depth: 0, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, ContentType: "text/html", DurationMs: 200, Depth: 1, NoIndex: true, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/b", Status: 301, ContentType: "", DurationMs: 50, Depth: 1, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/c", Status: 404, ContentType: "text/html", DurationMs: 10, Depth: 2, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/d", Status: 500, ContentType: "application/json", DurationMs: 30, Depth: 2, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/e", Status: 0, Blocked: false, Depth: 3, FetchedAt: now},
+		{CrawlID: c.ID, URL: "https://example.com/f", Status: 0, Blocked: true, Depth: 1, FetchedAt: now},
+	}
+	for _, p := range pages {
+		if _, err := s.AddPage(p, nil); err != nil {
+			t.Fatalf("AddPage(%s) error = %v", p.URL, err)
+		}
+	}
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Total != 7 {
+		t.Errorf("Total = %d, want 7", sum.Total)
+	}
+	if sum.Status2xx != 2 {
+		t.Errorf("Status2xx = %d, want 2", sum.Status2xx)
+	}
+	if sum.Status3xx != 1 {
+		t.Errorf("Status3xx = %d, want 1", sum.Status3xx)
+	}
+	if sum.Status4xx != 1 {
+		t.Errorf("Status4xx = %d, want 1", sum.Status4xx)
+	}
+	if sum.Status5xx != 1 {
+		t.Errorf("Status5xx = %d, want 1", sum.Status5xx)
+	}
+	if sum.Errors != 1 {
+		t.Errorf("Errors = %d, want 1", sum.Errors)
+	}
+	if sum.Blocked != 1 {
+		t.Errorf("Blocked = %d, want 1", sum.Blocked)
+	}
+	if sum.NoIndex != 1 {
+		t.Errorf("NoIndex = %d, want 1", sum.NoIndex)
+	}
+	if sum.MaxDepth != 3 {
+		t.Errorf("MaxDepth = %d, want 3", sum.MaxDepth)
+	}
+	wantCT := map[string]int{"text/html": 3, "application/json": 1}
+	if len(sum.ContentTypes) != len(wantCT) {
+		t.Errorf("ContentTypes = %+v, want %+v", sum.ContentTypes, wantCT)
+	}
+	for k, v := range wantCT {
+		if sum.ContentTypes[k] != v {
+			t.Errorf("ContentTypes[%q] = %d, want %d", k, sum.ContentTypes[k], v)
+		}
+	}
+	// avg over status > 0: (100+200+50+10+30)/5 = 78
+	if sum.AvgDurationMs != 78 {
+		t.Errorf("AvgDurationMs = %d, want 78", sum.AvgDurationMs)
+	}
+}
+
+func TestSummarize_EmptyCrawl(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Total != 0 {
+		t.Errorf("Total = %d, want 0", sum.Total)
+	}
+	if sum.MaxDepth != 0 {
+		t.Errorf("MaxDepth = %d, want 0", sum.MaxDepth)
+	}
+	if sum.AvgDurationMs != 0 {
+		t.Errorf("AvgDurationMs = %d, want 0", sum.AvgDurationMs)
+	}
+}
+
+func TestSummarize_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.Summarize(999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- BrokenLinks ---
+
+func TestBrokenLinks(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	homeID, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}, []Link{
+		{ToURL: "https://example.com/missing", Text: "broken link"},
+		{ToURL: "https://example.com/other-missing", Text: "another"},
+	})
+	if err != nil {
+		t.Fatalf("AddPage(home) error = %v", err)
+	}
+	aID, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, FetchedAt: now}, []Link{
+		{ToURL: "https://example.com/missing", Text: "also broken"},
+	})
+	if err != nil {
+		t.Fatalf("AddPage(a) error = %v", err)
+	}
+	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/missing", Status: 404, FetchedAt: now}, nil); err != nil {
+		t.Fatalf("AddPage(missing) error = %v", err)
+	}
+	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/other-missing", Status: 0, Blocked: false, Error: "timeout", FetchedAt: now}, nil); err != nil {
+		t.Fatalf("AddPage(other-missing) error = %v", err)
+	}
+	// A blocked page (status 0, blocked=true) must NOT count as broken.
+	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/blocked", Status: 0, Blocked: true, FetchedAt: now}, nil); err != nil {
+		t.Fatalf("AddPage(blocked) error = %v", err)
+	}
+
+	broken, err := s.BrokenLinks(c.ID)
+	if err != nil {
+		t.Fatalf("BrokenLinks() error = %v", err)
+	}
+	if len(broken) != 2 {
+		t.Fatalf("len(broken) = %d, want 2", len(broken))
+	}
+	// Ordered by url: /missing before /other-missing
+	if broken[0].Page.URL != "https://example.com/missing" {
+		t.Errorf("broken[0].Page.URL = %q", broken[0].Page.URL)
+	}
+	if broken[1].Page.URL != "https://example.com/other-missing" {
+		t.Errorf("broken[1].Page.URL = %q", broken[1].Page.URL)
+	}
+	if len(broken[0].Referrers) != 2 {
+		t.Fatalf("len(broken[0].Referrers) = %d, want 2", len(broken[0].Referrers))
+	}
+	// Referrers ordered by from_url: /  before /a
+	if broken[0].Referrers[0].FromURL != "https://example.com/" {
+		t.Errorf("Referrers[0].FromURL = %q", broken[0].Referrers[0].FromURL)
+	}
+	if broken[0].Referrers[1].FromURL != "https://example.com/a" {
+		t.Errorf("Referrers[1].FromURL = %q", broken[0].Referrers[1].FromURL)
+	}
+	if len(broken[1].Referrers) != 1 {
+		t.Fatalf("len(broken[1].Referrers) = %d, want 1", len(broken[1].Referrers))
+	}
+	_ = homeID
+	_ = aID
+}
+
+func TestBrokenLinks_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.BrokenLinks(999)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
