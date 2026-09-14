@@ -15,6 +15,12 @@ DSN `file:<path>?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_
 Al abrir, cualquier crawl en estado `running` pasa a `failed` con
 `error = "interrumpido"` (el proceso anterior murió).
 
+Antes de abrir, `Open` comprueba que el directorio de `path` existe y es
+escribible (crea y borra un fichero de sondeo); si no, devuelve un error en
+español que nombra el directorio, el uid del proceso y la solución para
+Docker (`chown 65532:65532 <dir>`), en vez del críptico
+`attempt to write a readonly database (1544)` de SQLite en WAL.
+
 ## Esquema
 
 ```sql

@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -76,6 +78,9 @@ var schemaStatements = []string{
 // schema and marks any crawl left in "running" state as failed (the process
 // that owned it died before finishing).
 func Open(path string) (*Store, error) {
+	if err := checkDirWritable(path); err != nil {
+		return nil, err
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -93,6 +98,35 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// checkDirWritable verifies that the directory holding the database file is
+// writable by the current process. SQLite in WAL mode needs to create the
+// -wal and -shm files next to the database, and an unwritable directory
+// surfaces as the cryptic "attempt to write a readonly database (1544)"
+// (SQLITE_READONLY_DIRECTORY). This is the classic Docker bind-mount problem:
+// the container runs as uid 65532 and the host directory is owned by someone
+// else. Say so explicitly.
+func checkDirWritable(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("no es un directorio")
+		}
+		return fmt.Errorf("store: el directorio de la base de datos %q no existe: %w", dir, err)
+	}
+	probe, err := os.CreateTemp(dir, ".eanbot-write-probe-*")
+	if err != nil {
+		return fmt.Errorf("store: el directorio de la base de datos %q no es escribible por el uid %d (SQLite en modo WAL necesita crear ficheros junto a la BBDD; en Docker: chown 65532:65532 %s): %w",
+			dir, os.Getuid(), dir, err)
+	}
+	name := probe.Name()
+	probe.Close()
+	os.Remove(name)
+	return nil
 }
 
 func (s *Store) init() error {

@@ -1,7 +1,7 @@
 NODE_BIN ?= $(HOME)/.nvm/versions/node/v24.21.0/bin
 export PATH := $(NODE_BIN):$(PATH)
 
-IMAGE   ?= 7u40qj0f.gra7.container-registry.ovh.net/xavi/eanbot
+IMAGE   ?= 7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot
 VERSION ?= dev
 
 .PHONY: build build-linux frontend test vet fmt run docker push docker-run

@@ -41,9 +41,12 @@ Contrato completo en `specs/004-api-web.md`.
 make docker VERSION=0.1.0        # compila frontend (Vite) y Go en la imagen; FROM scratch, uid 65532
 docker volume create eanbot-data
 docker run -d --name eanbot -p 8345:8345 -v eanbot-data:/data \
-    7u40qj0f.gra7.container-registry.ovh.net/xavi/eanbot:0.1.0
+    7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot:0.1.0
 docker exec eanbot /eanbot crawl https://xavi.net -db /data/eanbot.db
 ```
+
+Con un directorio del host en vez de volumen (`-v $PWD/data:/data`), hazlo
+escribible por el contenedor: `chown -R 65532:65532 data` (o `--user $(id -u)`).
 
 Detalles y verificación en `specs/007-docker.md`.
 

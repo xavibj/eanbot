@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -767,5 +769,23 @@ func TestBrokenLinks_NotFound(t *testing.T) {
 	_, err := s.BrokenLinks(999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestOpen_UnwritableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	_, err := Open(filepath.Join(dir, "ro.db"))
+	if err == nil {
+		t.Fatal("expected error opening a database in a read-only directory")
+	}
+	if !strings.Contains(err.Error(), "no es escribible") || !strings.Contains(err.Error(), "65532") {
+		t.Fatalf("error should explain the unwritable directory and the Docker uid, got: %v", err)
 	}
 }

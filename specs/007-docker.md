@@ -28,7 +28,7 @@ el fichero SQLite montado en `/data`.
 ## Makefile
 
 ```make
-IMAGE   ?= 7u40qj0f.gra7.container-registry.ovh.net/xavi/eanbot
+IMAGE   ?= 7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot
 VERSION ?= dev
 docker:      docker build --platform linux/amd64 -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
 push:        docker push $(IMAGE):$(VERSION) && docker push $(IMAGE):latest
@@ -41,12 +41,16 @@ docker-run:  docker run --rm -p 8345:8345 -v eanbot-data:/data $(IMAGE):$(VERSIO
 make docker VERSION=0.1.0
 docker volume create eanbot-data
 docker run -d --name eanbot -p 8345:8345 -v eanbot-data:/data \
-    7u40qj0f.gra7.container-registry.ovh.net/xavi/eanbot:0.1.0
+    7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot:0.1.0
 docker exec eanbot /eanbot crawl https://xavi.net -db /data/eanbot.db   # CLI dentro del contenedor
 ```
 
-Bind mount de un directorio del host: `chown 65532:65532` del directorio
-(SQLite en WAL necesita escribir `-wal`/`-shm` junto a la BBDD).
+Bind mount de un directorio del host (`-v $PWD/data:/data`): el directorio
+debe ser escribible por el uid 65532 del contenedor: `chown -R 65532:65532
+data` (SQLite en WAL necesita escribir `-wal`/`-shm` junto a la BBDD). Si no,
+el binario termina con `error: store: el directorio de la base de datos
+"/data" no es escribible por el uid 65532 (...)` y código 1. Alternativa sin
+chown: `docker run --user $(id -u):$(id -g) ...`.
 
 ## Verificación exigida
 
