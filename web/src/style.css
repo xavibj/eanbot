@@ -165,7 +165,8 @@ p { margin: 0 0 0.75rem; }
 
 input[type="text"],
 input[type="url"],
-select {
+select,
+textarea {
   font: inherit;
   font-size: 0.95rem;
   padding: 7px 10px;
@@ -176,8 +177,25 @@ select {
   width: 100%;
   max-width: 100%;
 }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
-input:disabled, select:disabled { background: var(--surface-alt); color: var(--muted); cursor: not-allowed; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+input:disabled, select:disabled, textarea:disabled { background: var(--surface-alt); color: var(--muted); cursor: not-allowed; }
+
+textarea {
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 4.5em;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
 
 /* ---------- forms ---------- */
 

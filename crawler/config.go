@@ -6,7 +6,9 @@
 package crawler
 
 import (
+	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,7 +26,8 @@ type Config struct {
 	RobotsToken       string        // default "eanbot"
 	IncludeSubdomains bool
 	IgnoreRobots      bool
-	UseSitemaps       bool // default true (see Defaults)
+	UseSitemaps       bool              // default true (see Defaults)
+	Headers           map[string]string // extra headers sent on ALL requests (pages, robots, sitemaps)
 }
 
 // Defaults returns the default configuration values, as fixed in
@@ -68,7 +71,49 @@ func (c Config) Validate() []string {
 		errs = append(errs, "delay_ms no puede ser negativo")
 	}
 
+	if len(c.Headers) > 0 {
+		names := make([]string, 0, len(c.Headers))
+		for name := range c.Headers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if !isValidHeaderName(name) {
+				errs = append(errs, fmt.Sprintf("cabecera no válida: %q", name))
+				continue
+			}
+			if strings.ContainsAny(c.Headers[name], "\r\n") {
+				errs = append(errs, fmt.Sprintf("valor de cabecera no válido: %q", name))
+			}
+		}
+	}
+
 	return errs
+}
+
+// isValidHeaderName reports whether name is a valid HTTP token: one or more
+// letters, digits or the characters !#$%&'*+-.^_`|~.
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !isTokenRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isTokenRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		return true
+	default:
+		return false
+	}
 }
 
 func isAbsoluteHTTPURL(raw string) bool {

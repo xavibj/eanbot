@@ -23,7 +23,9 @@ el bot adopta el host destino como ámbito del rastreo.
 
 Flags de `crawl`: `-db`, `-max-pages`, `-max-depth`, `-concurrency`, `-delay`,
 `-timeout`, `-user-agent`, `-include-subdomains`, `-ignore-robots`,
-`-no-sitemaps`, `-json`, `-quiet`. `Ctrl-C` cancela y guarda lo rastreado.
+`-no-sitemaps`, `-header "Nombre: valor"` (repetible; p. ej. `-header "x-ean-client: XXXX"`
+para que Cloudflare no bloquee al bot), `-json`, `-quiet`. `Ctrl-C` cancela y
+guarda lo rastreado. En la API y la web, las cabeceras van en `config.headers`.
 
 ## API
 

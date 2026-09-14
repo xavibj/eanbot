@@ -66,6 +66,13 @@ const config = computed(() => {
   }
 })
 
+// Only header names are shown: values may carry access tokens.
+const headerNames = computed(() => {
+  const raw = config.value?.headers
+  if (!raw || typeof raw !== 'object') return ''
+  return Object.keys(raw).join(', ')
+})
+
 const rangeLabel = computed(() => {
   if (total.value === 0) return '0 páginas'
   const from = offset.value + 1
@@ -279,6 +286,7 @@ onBeforeUnmount(() => {
           <span v-if="config.include_subdomains">subdominios incluidos</span>
           <span v-if="config.ignore_robots">robots.txt ignorado</span>
           <span v-if="config.use_sitemaps">sitemaps</span>
+          <span v-if="headerNames">cabeceras: {{ headerNames }}</span>
         </p>
       </div>
       <div class="btn-row">

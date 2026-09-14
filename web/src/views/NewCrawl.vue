@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { createCrawl, errorsOf } from '../api.js'
 import { crawlHref, navigate } from '../router.js'
 import ErrorList from '../components/ErrorList.vue'
@@ -15,10 +15,16 @@ const form = reactive({
   include_subdomains: false,
   ignore_robots: false,
   use_sitemaps: true,
+  headers: '',
 })
 
-const errors = ref([])
+const serverErrors = ref([])
+const headerErrors = ref([])
 const sending = ref(false)
+
+// Client-side header errors block the submit until the textarea is edited.
+const errors = computed(() => [...headerErrors.value, ...serverErrors.value])
+const blocked = computed(() => headerErrors.value.length > 0)
 
 function setText(field, event) {
   form[field] = String(event?.target?.value ?? '')
@@ -26,6 +32,31 @@ function setText(field, event) {
 
 function setDigits(field, event) {
   form[field] = String(event?.target?.value ?? '').replace(/[^0-9]/g, '')
+}
+
+function setHeaders(event) {
+  form.headers = String(event?.target?.value ?? '')
+  // Validation happens on submit, not on every keystroke; editing clears it.
+  if (headerErrors.value.length) headerErrors.value = []
+}
+
+// parseHeaders turns "Nombre: valor" lines into an object. Empty lines are
+// ignored; a line without ":" is rejected with its 1-based line number.
+function parseHeaders(text) {
+  const headers = {}
+  const errors = []
+  const lines = String(text ?? '').split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = String(lines[i] ?? '').trim()
+    if (line === '') continue
+    const at = line.indexOf(':')
+    if (at < 0) {
+      errors.push(`cabecera sin “:” en la línea ${i + 1}`)
+      continue
+    }
+    headers[line.slice(0, at).trim()] = line.slice(at + 1).trim()
+  }
+  return { headers, errors }
 }
 
 function setBool(field, event) {
@@ -39,7 +70,7 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null
 }
 
-function buildBody() {
+function buildBody(headers) {
   // Only fields the user actually filled in are sent; the server applies the
   // defaults. delay_ms is always sent as a number because 0 is meaningful.
   const body = { seed: String(form.seed ?? '').trim() }
@@ -52,25 +83,32 @@ function buildBody() {
   body.include_subdomains = !!form.include_subdomains
   body.ignore_robots = !!form.ignore_robots
   body.use_sitemaps = !!form.use_sitemaps
+  if (headers && Object.keys(headers).length > 0) body.headers = headers
   return body
 }
 
 async function onSubmit() {
   if (sending.value) return
+  const parsed = parseHeaders(form.headers)
+  serverErrors.value = []
+  if (parsed.errors.length) {
+    headerErrors.value = parsed.errors
+    return
+  }
+  headerErrors.value = []
   sending.value = true
-  errors.value = []
   try {
-    const data = await createCrawl(buildBody())
+    const data = await createCrawl(buildBody(parsed.headers))
     // The API may answer with the bare crawl object or wrap it in {crawl}.
     const crawl = data && data.crawl ? data.crawl : data
     const id = crawl && crawl.id
     if (id === undefined || id === null) {
-      errors.value = ['la petición ha fallado']
+      serverErrors.value = ['la petición ha fallado']
       return
     }
     navigate(crawlHref(id))
   } catch (err) {
-    errors.value = errorsOf(err)
+    serverErrors.value = errorsOf(err)
   } finally {
     sending.value = false
   }
@@ -192,12 +230,27 @@ async function onSubmit() {
         </label>
       </div>
 
+      <div class="field field--wide" style="margin-top: 16px">
+        <label for="headers">Cabeceras adicionales</label>
+        <textarea
+          id="headers"
+          rows="3"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="x-ean-client: XXXXXXXX"
+          :value="form.headers"
+          :disabled="sending"
+          @input="setHeaders"
+        ></textarea>
+        <span class="hint">Una por línea, con formato <code>Nombre: valor</code>.</span>
+      </div>
+
       <div v-if="errors.length" style="margin-top: 16px">
         <ErrorList :errors="errors" />
       </div>
 
       <div class="form-actions">
-        <button type="submit" class="btn btn-primary" :disabled="sending">
+        <button type="submit" class="btn btn-primary" :disabled="sending || blocked">
           {{ sending ? 'Creando…' : 'Empezar rastreo' }}
         </button>
         <a class="btn" href="#/" :class="sending ? 'is-disabled' : ''">Cancelar</a>

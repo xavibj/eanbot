@@ -222,17 +222,18 @@ func (sk *storeSink) Page(p crawler.Page) {
 // specs/004-api-web.md, both in POST /api/crawls requests and as stored on
 // the crawl record.
 type configDoc struct {
-	Seed              string `json:"seed"`
-	MaxPages          int    `json:"max_pages"`
-	MaxDepth          int    `json:"max_depth"`
-	Concurrency       int    `json:"concurrency"`
-	DelayMs           *int   `json:"delay_ms"`
-	TimeoutMs         int    `json:"timeout_ms"`
-	MaxBodyBytes      int64  `json:"max_body_bytes"`
-	UserAgent         string `json:"user_agent"`
-	IncludeSubdomains bool   `json:"include_subdomains"`
-	IgnoreRobots      bool   `json:"ignore_robots"`
-	UseSitemaps       *bool  `json:"use_sitemaps"`
+	Seed              string            `json:"seed"`
+	MaxPages          int               `json:"max_pages"`
+	MaxDepth          int               `json:"max_depth"`
+	Concurrency       int               `json:"concurrency"`
+	DelayMs           *int              `json:"delay_ms"`
+	TimeoutMs         int               `json:"timeout_ms"`
+	MaxBodyBytes      int64             `json:"max_body_bytes"`
+	UserAgent         string            `json:"user_agent"`
+	IncludeSubdomains bool              `json:"include_subdomains"`
+	IgnoreRobots      bool              `json:"ignore_robots"`
+	UseSitemaps       *bool             `json:"use_sitemaps"`
+	Headers           map[string]string `json:"headers"`
 }
 
 // configToCrawlerConfig converts a decoded request body into a
@@ -251,6 +252,7 @@ func configToCrawlerConfig(doc configDoc) crawler.Config {
 		UserAgent:         doc.UserAgent,
 		IncludeSubdomains: doc.IncludeSubdomains,
 		IgnoreRobots:      doc.IgnoreRobots,
+		Headers:           doc.Headers,
 	}
 
 	if doc.DelayMs != nil {
@@ -273,6 +275,10 @@ func configToCrawlerConfig(doc configDoc) crawler.Config {
 func configToJSON(cfg crawler.Config) (json.RawMessage, error) {
 	delayMs := int(cfg.Delay.Milliseconds())
 	useSitemaps := cfg.UseSitemaps
+	headers := cfg.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
 	doc := configDoc{
 		Seed:              cfg.Seed,
 		MaxPages:          cfg.MaxPages,
@@ -285,6 +291,7 @@ func configToJSON(cfg crawler.Config) (json.RawMessage, error) {
 		IncludeSubdomains: cfg.IncludeSubdomains,
 		IgnoreRobots:      cfg.IgnoreRobots,
 		UseSitemaps:       &useSitemaps,
+		Headers:           headers,
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

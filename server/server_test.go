@@ -312,6 +312,96 @@ func TestPostCrawl_ExplicitZeroDelay(t *testing.T) {
 	waitUntilDone(t, h, crawl.ID, 5*time.Second)
 }
 
+func TestPostCrawl_HeadersPassedToFetcherAndStored(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://headers.example/", statusResponse(200))
+
+	st := newTestStore(t)
+	var gotCfg crawler.Config
+	factory := func(cfg crawler.Config) crawler.Fetcher {
+		gotCfg = cfg
+		return f
+	}
+	srv := New(st, Options{NewFetcher: factory})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	})
+	h := srv.Handler()
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":    "https://headers.example/",
+		"headers": map[string]string{"X-Ean-Client": "abc"},
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	if gotCfg.Headers["X-Ean-Client"] != "abc" {
+		t.Errorf("NewFetcher received Config.Headers = %v, want X-Ean-Client=abc", gotCfg.Headers)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
+	}
+	if headers["X-Ean-Client"] != "abc" {
+		t.Errorf("stored headers = %v, want X-Ean-Client=abc (name as sent by the user)", headers)
+	}
+}
+
+func TestPostCrawl_HeadersAbsentStoredAsEmptyObject(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://noheaders.example/", statusResponse(200))
+	_, h := newTestServer(t, f)
+
+	reqBody := mustJSON(t, map[string]any{"seed": "https://noheaders.example/"})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	crawl := decodeJSON[store.Crawl](t, w)
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
+	}
+	if len(headers) != 0 {
+		t.Errorf("headers = %v, want empty object", headers)
+	}
+}
+
+func TestPostCrawl_InvalidHeaderName(t *testing.T) {
+	_, h := newTestServer(t, newFakeFetcher())
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":    "https://example.com/",
+		"headers": map[string]string{"bad header": "abc"},
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	body := decodeJSON[errorsBody](t, w)
+	want := `cabecera no válida: "bad header"`
+	if len(body.Errors) != 1 || body.Errors[0] != want {
+		t.Errorf("errors = %v, want [%q]", body.Errors, want)
+	}
+}
+
 func TestPostCrawl_InvalidReturnsAllErrors(t *testing.T) {
 	_, h := newTestServer(t, newFakeFetcher())
 

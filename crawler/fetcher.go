@@ -30,6 +30,12 @@ type HTTPFetcher struct {
 	client    *http.Client
 	userAgent string
 	maxBody   int64
+
+	// Headers holds extra headers added to every request (pages, robots.txt
+	// and sitemaps alike) after User-Agent and Accept, so a header here can
+	// override either of them — including User-Agent itself. Header names
+	// are canonicalized (http.CanonicalHeaderKey) when sent.
+	Headers map[string]string
 }
 
 // NewHTTPFetcher builds an HTTPFetcher. It never follows redirects (3xx
@@ -57,6 +63,9 @@ func (h *HTTPFetcher) Fetch(ctx context.Context, url string) (*Response, error) 
 	}
 	req.Header.Set("User-Agent", h.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+	for k, v := range h.Headers {
+		req.Header.Set(http.CanonicalHeaderKey(k), v)
+	}
 
 	start := time.Now()
 	resp, err := h.client.Do(req)

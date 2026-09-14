@@ -79,6 +79,46 @@ func TestConfigValidate(t *testing.T) {
 				"delay_ms no puede ser negativo",
 			},
 		},
+		{
+			name: "invalid header name",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Headers: map[string]string{"x ean": "abc"},
+			},
+			want: []string{`cabecera no válida: "x ean"`},
+		},
+		{
+			name: "empty header name",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Headers: map[string]string{"": "abc"},
+			},
+			want: []string{`cabecera no válida: ""`},
+		},
+		{
+			name: "header value with newline",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Headers: map[string]string{"X-Ean-Client": "abc\ndef"},
+			},
+			want: []string{`valor de cabecera no válido: "X-Ean-Client"`},
+		},
+		{
+			name: "header value with carriage return",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Headers: map[string]string{"X-Ean-Client": "abc\rdef"},
+			},
+			want: []string{`valor de cabecera no válido: "X-Ean-Client"`},
+		},
+		{
+			name: "valid custom header",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Headers: map[string]string{"X-Ean-Client": "abc"},
+			},
+			want: nil,
+		},
 	}
 
 	for _, tt := range tests {

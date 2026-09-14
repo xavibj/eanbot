@@ -166,6 +166,112 @@ func TestCrawlMissingSeed(t *testing.T) {
 	}
 }
 
+func TestCrawlHeaderFlagWithoutColon(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"crawl", "https://example.com", "-db", tempDBPath(t), "-header", "sin-dos-puntos",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code = %d, want 2, stderr = %s", code, stderr.String())
+	}
+	want := `cabecera sin ':': "sin-dos-puntos"`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}
+
+func TestCrawlHeaderFlagSentToServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			return
+		}
+		if r.Header.Get("X-Ean-Client") != "abc" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>ok</body></html>`)
+	}))
+	defer srv.Close()
+
+	code, stdout, stderr := runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet",
+		"-header", "X-Ean-Client: abc")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	var out crawlJSONOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout, err)
+	}
+	if out.Summary.Status2xx != 1 {
+		t.Errorf("with -header: Summary.Status2xx = %d, want 1 (got status %d)", out.Summary.Status2xx, out.Summary.Status4xx)
+	}
+
+	code, stdout, stderr = runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (a 403 page is still a completed crawl), stderr = %s", code, stderr)
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout, err)
+	}
+	if out.Summary.Status4xx != 1 {
+		t.Errorf("without -header: Summary.Status4xx = %d, want 1", out.Summary.Status4xx)
+	}
+}
+
+func TestCrawlHeaderFlagStoredInConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	code, stdout, stderr := runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet",
+		"-header", "X-Ean-Client: abc")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	var out crawlJSONOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(out.Crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
+	}
+	if headers["X-Ean-Client"] != "abc" {
+		t.Errorf("stored headers = %v, want X-Ean-Client=abc", headers)
+	}
+}
+
+func TestCrawlNoHeaderFlagStoredAsEmptyObject(t *testing.T) {
+	srv := newCrawlServer()
+	defer srv.Close()
+
+	code, stdout, stderr := runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	var out crawlJSONOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(out.Crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
+	}
+	if len(headers) != 0 {
+		t.Errorf("headers = %v, want empty object", headers)
+	}
+}
+
 func TestCrawlSuccessAndSummary(t *testing.T) {
 	srv := newCrawlServer()
 	defer srv.Close()

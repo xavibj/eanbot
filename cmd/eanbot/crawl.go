@@ -34,6 +34,16 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
 	quiet := fs.Bool("quiet", false, "no mostrar el progreso en stderr")
 
+	headers := map[string]string{}
+	fs.Func("header", `cabecera adicional "Nombre: valor" para todas las peticiones (repetible)`, func(v string) error {
+		name, value, ok := strings.Cut(v, ":")
+		if !ok {
+			return fmt.Errorf("cabecera sin ':': %q", v)
+		}
+		headers[strings.TrimSpace(name)] = strings.TrimSpace(value)
+		return nil
+	})
+
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		fmt.Fprintln(stderr, "error: se requiere una URL semilla")
 		return 2
@@ -60,6 +70,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		IncludeSubdomains: *includeSubdomains,
 		IgnoreRobots:      *ignoreRobots,
 		UseSitemaps:       !*noSitemaps,
+		Headers:           headers,
 	}
 
 	if errs := cfg.Validate(); len(errs) > 0 {
@@ -89,6 +100,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 
 	fetcher := crawler.NewHTTPFetcher(cfg.UserAgent, cfg.Timeout, cfg.MaxBodyBytes)
+	fetcher.Headers = cfg.Headers
 	sink := &progressSink{st: st, crawlID: crawl.ID, stderr: stderr, quiet: *quiet}
 
 	stats, runErr := crawler.Run(ctx, cfg, fetcher, sink)
@@ -217,22 +229,27 @@ func crawlerPageCode(p crawler.Page) string {
 // duplicated here, rather than imported, because cmd/eanbot must not modify
 // server/ or depend on its unexported identifiers.
 type crawlConfigDoc struct {
-	Seed              string `json:"seed"`
-	MaxPages          int    `json:"max_pages"`
-	MaxDepth          int    `json:"max_depth"`
-	Concurrency       int    `json:"concurrency"`
-	DelayMs           int    `json:"delay_ms"`
-	TimeoutMs         int    `json:"timeout_ms"`
-	MaxBodyBytes      int64  `json:"max_body_bytes"`
-	UserAgent         string `json:"user_agent"`
-	IncludeSubdomains bool   `json:"include_subdomains"`
-	IgnoreRobots      bool   `json:"ignore_robots"`
-	UseSitemaps       bool   `json:"use_sitemaps"`
+	Seed              string            `json:"seed"`
+	MaxPages          int               `json:"max_pages"`
+	MaxDepth          int               `json:"max_depth"`
+	Concurrency       int               `json:"concurrency"`
+	DelayMs           int               `json:"delay_ms"`
+	TimeoutMs         int               `json:"timeout_ms"`
+	MaxBodyBytes      int64             `json:"max_body_bytes"`
+	UserAgent         string            `json:"user_agent"`
+	IncludeSubdomains bool              `json:"include_subdomains"`
+	IgnoreRobots      bool              `json:"ignore_robots"`
+	UseSitemaps       bool              `json:"use_sitemaps"`
+	Headers           map[string]string `json:"headers"`
 }
 
 // crawlConfigJSON serializes cfg (already fully resolved from flags, no
 // zero-value ambiguity) as the canonical "config" object.
 func crawlConfigJSON(cfg crawler.Config) (json.RawMessage, error) {
+	headers := cfg.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
 	doc := crawlConfigDoc{
 		Seed:              cfg.Seed,
 		MaxPages:          cfg.MaxPages,
@@ -245,6 +262,7 @@ func crawlConfigJSON(cfg crawler.Config) (json.RawMessage, error) {
 		IncludeSubdomains: cfg.IncludeSubdomains,
 		IgnoreRobots:      cfg.IgnoreRobots,
 		UseSitemaps:       cfg.UseSitemaps,
+		Headers:           headers,
 	}
 	return json.Marshal(doc)
 }

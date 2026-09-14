@@ -48,7 +48,9 @@ func New(st *store.Store, opts Options) *Server {
 	newFetcher := opts.NewFetcher
 	if newFetcher == nil {
 		newFetcher = func(cfg crawler.Config) crawler.Fetcher {
-			return crawler.NewHTTPFetcher(cfg.UserAgent, cfg.Timeout, cfg.MaxBodyBytes)
+			hf := crawler.NewHTTPFetcher(cfg.UserAgent, cfg.Timeout, cfg.MaxBodyBytes)
+			hf.Headers = cfg.Headers
+			return hf
 		}
 	}
 	return &Server{
