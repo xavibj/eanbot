@@ -47,9 +47,15 @@ interno"]}`.
   "max_pages": 500, "max_depth": 10, "concurrency": 4, "delay_ms": 500,
   "timeout_ms": 15000, "max_body_bytes": 2097152,
   "user_agent": "EANBot/0.1 (+https://xavi.net)",
-  "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true
+  "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true,
+  "headers": {"x-ean-client": "XXXXXXXX"}
 }
 ```
+
+`headers` es un objeto opcional nombre → valor (cadenas); se envía en todas
+las peticiones del rastreo (útil para que un WAF como Cloudflare no bloquee
+al bot). Ausente o `null` → sin cabeceras extra (se almacena como `{}`).
+Los errores de validación de cabeceras son los de `crawler.Config.Validate`.
 Campos ausentes o 0 → valor por defecto (`WithDefaults`), **excepto
 `delay_ms`**: `crawler.WithDefaults` respeta `Delay == 0` como valor explícito
 (sin cortesía), así que el servidor decodifica `delay_ms` como puntero (`*int`)
@@ -107,7 +113,10 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
   2. **Nuevo rastreo** (`#/new`): formulario con semilla (obligatoria,
      valor inicial `https://xavibolivar.xavi.net`), máx. páginas, profundidad,
      concurrencia, retardo ms, incluir subdominios, ignorar robots, usar
-     sitemaps. Inputs numéricos como `type="text" inputmode="numeric"` con
+     sitemaps, y un `textarea` «Cabeceras adicionales» (una por línea,
+     formato `Nombre: valor`; líneas vacías ignoradas; una línea sin `:` se
+     rechaza en cliente con el mensaje «cabecera sin “:” en la línea N»).
+     Se envía como objeto `headers`. Inputs numéricos como `type="text" inputmode="numeric"` con
      coerción defensiva. Errores `400` se muestran en lista bajo el
      formulario; controles deshabilitados durante la petición; error de red
      → «la petición ha fallado». Al crear, navega a `#/crawls/{id}`.
@@ -127,7 +136,9 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
 
 ## Tests exigidos (`httptest` contra `Handler()`, Fetcher falso)
 
-healthz; POST válido → 201 y crawl en store, y tras esperar a que termine
+healthz; POST con `headers` → el Fetcher falso recibe la cabecera en cada
+petición (el `NewFetcher` inyectado recibe la `Config` con `Headers`) y el
+config almacenado la incluye; POST con cabecera inválida → 400; POST válido → 201 y crawl en store, y tras esperar a que termine
 (polling a GET hasta `running == false`, con timeout) el summary coincide con
 lo que sirvió el Fetcher falso; POST inválido → 400 con TODOS los errores;
 JSON malformado; 405 con Allow; 404 JSON en id inexistente, id no numérico,

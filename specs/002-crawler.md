@@ -21,6 +21,7 @@ type Config struct {
     IncludeSubdomains bool
     IgnoreRobots      bool
     UseSitemaps       bool          // por defecto true (ver Defaults)
+    Headers           map[string]string // cabeceras extra en TODAS las peticiones (páginas, robots, sitemaps)
 }
 
 func Defaults() Config                  // los valores de specs/001
@@ -46,6 +47,9 @@ type Fetcher interface {
 // Accept: text/html,application/xhtml+xml,*/*;q=0.8. Lee como máximo
 // MaxBodyBytes+1 para detectar Truncated.
 func NewHTTPFetcher(userAgent string, timeout time.Duration, maxBody int64) *HTTPFetcher
+// HTTPFetcher.Headers (campo exportado, map[string]string) se añade a cada
+// petición DESPUÉS de User-Agent y Accept, así que puede sobrescribirlos.
+// Los nombres se canonicalizan (http.CanonicalHeaderKey).
 
 type Link struct {
     URL      string // absoluta y normalizada
@@ -245,6 +249,9 @@ sí misma; el motor la protege con un mutex.
 - `max_depth no puede ser negativo`
 - `concurrency debe ser mayor que 0`
 - `delay_ms no puede ser negativo`
+- `cabecera no válida: "<nombre>"` (nombre vacío o con caracteres fuera de un
+  token HTTP: letras, dígitos y `!#$%&'*+-.^_`|~`; uno por cabecera inválida)
+- `valor de cabecera no válido: "<nombre>"` (valor con CR o LF)
 
 ## Tests exigidos (mínimo)
 
@@ -268,4 +275,7 @@ sí misma; el motor la protege con un mutex.
   (`Stats.RobotsTxt`/`Stats.FinalHost` reflejan el host final); sitemaps
   resueltos con el host final tras la cadena de la semilla.
 - HTTPFetcher con `httptest.Server`: User-Agent enviado, no sigue 301,
-  Truncated con body > MaxBodyBytes, timeout.
+  Truncated con body > MaxBodyBytes, timeout, `Headers` enviadas en páginas y
+  en robots.txt (nombre canonicalizado) y que una cabecera `User-Agent` en
+  `Headers` sobrescribe la configurada.
+- Validate: cabeceras con nombre inválido y valor con salto de línea.
