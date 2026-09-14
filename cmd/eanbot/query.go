@@ -1,0 +1,229 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+
+	"xavi.net/eanbot/store"
+)
+
+// cmdCrawls implements "eanbot crawls [flags]".
+func cmdCrawls(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("crawls", stderr)
+	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
+	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "error: argumentos no reconocidos: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	crawls, err := st.ListCrawls()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if *jsonOutput {
+		return writeJSONLine(stdout, stderr, struct {
+			Crawls []store.Crawl `json:"crawls"`
+		}{crawls})
+	}
+
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tESTADO\tPÁGINAS\tINICIO\tSEMILLA")
+	for _, c := range crawls {
+		fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\n",
+			c.ID, c.Status, c.PagesCount, c.StartedAt.Format("2006-01-02 15:04:05"), c.Seed)
+	}
+	return flushTabwriter(tw, stderr)
+}
+
+// cmdPages implements "eanbot pages <crawl-id> [flags]".
+func cmdPages(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("pages", stderr)
+	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
+	status := fs.String("status", "", "filtrar por estado: 2xx|3xx|4xx|5xx|error|blocked")
+	query := fs.String("q", "", "filtrar por texto en la URL o el título")
+	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
+
+	crawlID, args, code := shiftCrawlID(args, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "error: argumentos no reconocidos: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if crawlID < 0 {
+		fmt.Fprintln(stderr, "error: rastreo no encontrado")
+		return 1
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	if _, err := st.GetCrawl(crawlID); err != nil {
+		return reportCrawlLookupError(stderr, err)
+	}
+
+	pages, total, err := st.ListPages(crawlID, store.PageFilter{Status: *status, Query: *query})
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if *jsonOutput {
+		return writeJSONLine(stdout, stderr, struct {
+			Pages []store.Page `json:"pages"`
+			Total int          `json:"total"`
+		}{pages, total})
+	}
+
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "CÓDIGO\tTIPO\tPROF.\tURL\tTÍTULO")
+	for _, p := range pages {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", storePageCode(p), p.ContentType, p.Depth, p.URL, p.Title)
+	}
+	return flushTabwriter(tw, stderr)
+}
+
+// cmdBroken implements "eanbot broken <crawl-id> [flags]".
+func cmdBroken(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("broken", stderr)
+	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
+	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
+
+	crawlID, args, code := shiftCrawlID(args, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "error: argumentos no reconocidos: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if crawlID < 0 {
+		fmt.Fprintln(stderr, "error: rastreo no encontrado")
+		return 1
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	broken, err := st.BrokenLinks(crawlID)
+	if err != nil {
+		return reportCrawlLookupError(stderr, err)
+	}
+
+	if *jsonOutput {
+		return writeJSONLine(stdout, stderr, struct {
+			Broken []store.BrokenLink `json:"broken"`
+		}{broken})
+	}
+
+	for _, b := range broken {
+		fmt.Fprintf(stdout, "%s  %s\n", b.Page.URL, storePageCode(b.Page))
+		for _, r := range b.Referrers {
+			text := r.Text
+			if text != "" {
+				fmt.Fprintf(stdout, "    <- %s (%q)\n", r.FromURL, text)
+			} else {
+				fmt.Fprintf(stdout, "    <- %s\n", r.FromURL)
+			}
+		}
+	}
+	return 0
+}
+
+// shiftCrawlID extracts the leading positional <crawl-id> argument shared by
+// "pages" and "broken", returning the remaining args to feed the FlagSet.
+// A non-numeric id is reported as id == -1 (translated by the caller into
+// "rastreo no encontrado", exit 1) rather than a flag-parsing error, per
+// specs/005-cli.md.
+func shiftCrawlID(args []string, stderr io.Writer) (id int64, rest []string, code int) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(stderr, "error: se requiere el id del rastreo")
+		return 0, nil, 2
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return -1, args[1:], 0
+	}
+	return id, args[1:], 0
+}
+
+// reportCrawlLookupError turns a store error from GetCrawl/BrokenLinks into
+// the CLI's exit code and message: ErrNotFound is reported as "rastreo no
+// encontrado", anything else as a generic error.
+func reportCrawlLookupError(stderr io.Writer, err error) int {
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Fprintln(stderr, "error: rastreo no encontrado")
+	} else {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+	}
+	return 1
+}
+
+// storePageCode is the short status column used by "pages" and "broken":
+// the numeric HTTP status, or BLOQ/ERR when no request was made or it
+// failed.
+func storePageCode(p store.Page) string {
+	switch {
+	case p.Blocked:
+		return "BLOQ"
+	case p.Status == 0:
+		return "ERR"
+	default:
+		return strconv.Itoa(p.Status)
+	}
+}
+
+// writeJSONLine marshals v to stdout followed by a newline.
+func writeJSONLine(stdout, stderr io.Writer, v any) int {
+	b, err := json.Marshal(v)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	stdout.Write(b)
+	fmt.Fprintln(stdout)
+	return 0
+}
+
+// flushTabwriter flushes tw, reporting any error as a normal execution
+// failure.
+func flushTabwriter(tw *tabwriter.Writer, stderr io.Writer) int {
+	if err := tw.Flush(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
+}
