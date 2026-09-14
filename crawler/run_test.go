@@ -216,31 +216,12 @@ func TestRunRedirectInScope(t *testing.T) {
 	}
 }
 
-func TestRunRedirectOutOfScope(t *testing.T) {
-	f := newFakeFetcher()
-	f.set("https://example.com/", redirectResponse(301, "https://other.com/x"))
-
-	sink := &memorySink{}
-	cfg := Config{Seed: "https://example.com/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
-
-	stats, err := Run(context.Background(), cfg, f, sink)
-	if err != nil {
-		t.Fatalf("Run error: %v", err)
-	}
-	if stats.Fetched != 1 {
-		t.Errorf("Fetched = %d, want 1", stats.Fetched)
-	}
-	if stats.Queued != 0 {
-		t.Errorf("Queued = %d, want 0", stats.Queued)
-	}
-	if f.callCount() != 1 {
-		t.Errorf("fetch calls = %d, want 1 (other.com must never be fetched)", f.callCount())
-	}
-	pages := sink.all()
-	if len(pages) != 1 || pages[0].RedirectTo != "https://other.com/x" {
-		t.Errorf("pages = %+v", pages)
-	}
-}
+// Note: a depth-0 (seed) redirect to a different host used to stop the
+// crawl right there; specs/002-crawler.md now requires the crawler to
+// follow it and adopt the new host as scope instead. See
+// TestRunSeedRedirectChangesScope for that behavior, and
+// TestRunDepth1CrossHostRedirectStillNotFollowed for confirmation that
+// deeper (depth > 0) cross-host redirects are still not followed.
 
 func TestRunMetaNoFollowStopsAllLinks(t *testing.T) {
 	f := newFakeFetcher()
@@ -434,6 +415,225 @@ func TestRunValidatesConfig(t *testing.T) {
 	_, err := Run(context.Background(), Config{}, f, sink)
 	if err == nil {
 		t.Fatal("expected a validation error")
+	}
+}
+
+func TestRunSeedRedirectChangesScope(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://old.example/", redirectResponse(301, "https://new.example/"))
+	f.set("https://new.example/", htmlResponse(`<a href="/page2">p2</a>`))
+	f.set("https://new.example/page2", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://old.example/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.FinalHost != "new.example" {
+		t.Errorf("FinalHost = %q, want new.example", stats.FinalHost)
+	}
+	if stats.Fetched != 3 {
+		t.Errorf("Fetched = %d, want 3", stats.Fetched)
+	}
+	want := []string{
+		"https://old.example/",
+		"https://new.example/",
+		"https://new.example/page2",
+	}
+	got := sink.urls()
+	if len(got) != len(want) {
+		t.Fatalf("sink urls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sink order[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	pages := sink.all()
+	if pages[0].RedirectTo != "https://new.example/" {
+		t.Errorf("seed RedirectTo = %q, want https://new.example/", pages[0].RedirectTo)
+	}
+}
+
+func TestRunSeedRedirectChainTwoHops(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://a.example/", redirectResponse(302, "https://b.example/"))
+	f.set("https://b.example/", redirectResponse(302, "https://c.example/"))
+	f.set("https://c.example/", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://a.example/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.FinalHost != "c.example" {
+		t.Errorf("FinalHost = %q, want c.example", stats.FinalHost)
+	}
+	if stats.Fetched != 3 {
+		t.Errorf("Fetched = %d, want 3", stats.Fetched)
+	}
+	want := []string{"https://a.example/", "https://b.example/", "https://c.example/"}
+	got := sink.urls()
+	if len(got) != len(want) {
+		t.Fatalf("sink urls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sink order[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRunSeedRedirectHopLimit(t *testing.T) {
+	const hosts = 7 // host0..host6
+	f := newFakeFetcher()
+	for i := 0; i < hosts-1; i++ {
+		from := fmt.Sprintf("https://host%d.example/", i)
+		to := fmt.Sprintf("https://host%d.example/", i+1)
+		f.set(from, redirectResponse(302, to))
+	}
+	// host6 must never be fetched: no response configured for it, so the
+	// fake fetcher would return an error if the crawler mistakenly tried.
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://host0.example/", Concurrency: 1, IgnoreRobots: true, MaxPages: 100, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	// 5 host switches are allowed: host0->1->2->3->4->5 (5 switches),
+	// landing on host5. host5's own redirect to host6 is the 6th switch
+	// attempt, which must be refused.
+	if stats.FinalHost != "host5.example" {
+		t.Errorf("FinalHost = %q, want host5.example", stats.FinalHost)
+	}
+	if stats.Fetched != 6 {
+		t.Errorf("Fetched = %d, want 6", stats.Fetched)
+	}
+	for _, u := range f.calledURLs() {
+		if u == "https://host6.example/" {
+			t.Fatal("host6 must never be fetched (hop limit exceeded)")
+		}
+	}
+	pages := sink.all()
+	if len(pages) != 6 {
+		t.Fatalf("sink got %d pages, want 6", len(pages))
+	}
+	last := pages[len(pages)-1]
+	if last.URL != "https://host5.example/" || last.RedirectTo != "https://host6.example/" {
+		t.Errorf("last page = %+v, want URL host5.example with RedirectTo host6.example", last)
+	}
+}
+
+func TestRunDepth1CrossHostRedirectStillNotFollowed(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://a.example/", htmlResponse(`<a href="/out">out</a>`))
+	f.set("https://a.example/out", redirectResponse(302, "https://other.example/"))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://a.example/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.FinalHost != "a.example" {
+		t.Errorf("FinalHost = %q, want a.example (depth-1 redirect must not change scope)", stats.FinalHost)
+	}
+	if stats.Fetched != 2 {
+		t.Errorf("Fetched = %d, want 2", stats.Fetched)
+	}
+	if stats.Queued != 0 {
+		t.Errorf("Queued = %d, want 0", stats.Queued)
+	}
+	for _, u := range f.calledURLs() {
+		if u == "https://other.example/" {
+			t.Fatal("other.example must never be fetched (depth > 0 cross-host redirect)")
+		}
+	}
+}
+
+func TestRunSeedRedirectAppliesNewHostRobots(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://old.example/robots.txt", robotsResponse(""))
+	f.set("https://old.example/", redirectResponse(301, "https://new.example/"))
+	newRobotsBody := "User-agent: eanbot\nDisallow: /private/\n\nUser-agent: *\nDisallow:\n"
+	f.set("https://new.example/robots.txt", robotsResponse(newRobotsBody))
+	f.set("https://new.example/", htmlResponse(`<a href="/private/x">x</a><a href="/public/y">y</a>`))
+	f.set("https://new.example/public/y", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://old.example/", Concurrency: 1, MaxPages: 10, MaxDepth: 10, UseSitemaps: false}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.FinalHost != "new.example" {
+		t.Errorf("FinalHost = %q, want new.example", stats.FinalHost)
+	}
+	if stats.RobotsTxt != newRobotsBody {
+		t.Errorf("RobotsTxt = %q, want the new host's robots.txt body", stats.RobotsTxt)
+	}
+	if stats.Fetched != 3 {
+		t.Errorf("Fetched = %d, want 3", stats.Fetched)
+	}
+	if stats.Blocked != 1 {
+		t.Errorf("Blocked = %d, want 1", stats.Blocked)
+	}
+	var sawBlocked bool
+	for _, p := range sink.all() {
+		if p.URL == "https://new.example/private/x" {
+			sawBlocked = true
+			if !p.Blocked {
+				t.Error("/private/x should be Blocked under the new host's robots.txt")
+			}
+		}
+	}
+	if !sawBlocked {
+		t.Error("expected a page for https://new.example/private/x")
+	}
+}
+
+func TestRunSitemapsUseFinalHostAfterSeedRedirect(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://old.example/robots.txt", robotsResponse("")) // no sitemap here
+	f.set("https://old.example/", redirectResponse(301, "https://new.example/"))
+	f.set("https://new.example/robots.txt", robotsResponse("Sitemap: https://new.example/sitemap.xml\n"))
+	f.set("https://new.example/sitemap.xml", &Response{
+		Status:      200,
+		ContentType: "application/xml",
+		Body:        []byte(`<urlset><url><loc>https://new.example/from-sitemap</loc></url></urlset>`),
+	})
+	f.set("https://new.example/", htmlResponse(``))
+	f.set("https://new.example/from-sitemap", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://old.example/", Concurrency: 1, MaxPages: 10, MaxDepth: 10, UseSitemaps: true}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.FinalHost != "new.example" {
+		t.Errorf("FinalHost = %q, want new.example", stats.FinalHost)
+	}
+	if stats.Sitemaps != 1 {
+		t.Errorf("Sitemaps = %d, want 1", stats.Sitemaps)
+	}
+	var sawSitemapPage bool
+	for _, p := range sink.all() {
+		if p.URL == "https://new.example/from-sitemap" {
+			sawSitemapPage = true
+		}
+	}
+	if !sawSitemapPage {
+		t.Error("expected the sitemap-discovered URL (from the new host) to be crawled")
 	}
 }
 

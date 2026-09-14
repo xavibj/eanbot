@@ -82,8 +82,9 @@ type Sink interface {
 type Stats struct {
     Fetched, Blocked, Errors int // Fetched cuenta cualquier petición realizada (cualquier código)
     Queued                   int // URLs que quedaron sin visitar por límites
-    RobotsTxt                string
-    Sitemaps                 int // URLs descubiertas vía sitemaps
+    RobotsTxt                string // robots.txt del host final (ver "Motor")
+    Sitemaps                 int    // URLs descubiertas vía sitemaps
+    FinalHost                string // host efectivo del ámbito (ver "Motor", cambio de ámbito de la semilla)
 }
 
 // Run ejecuta el rastreo completo y devuelve estadísticas. Termina cuando
@@ -181,22 +182,60 @@ sí misma; el motor la protege con un mutex.
 
 1. `cfg = cfg.WithDefaults()`; si `Validate()` devuelve errores → `error` con
    ellos unidos por `; `.
-2. Normaliza la semilla; `seedHost` = host normalizado. Push(seed, 0).
-3. robots (ver arriba). `delay = max(cfg.Delay, robots.CrawlDelay)`.
-4. Sitemaps (ver arriba).
-5. Bucle: `Concurrency` workers; un limitador global asegura que entre dos
-   inicios de petición pasan al menos `delay` (un `time.Ticker`/último inicio
-   con mutex). El coordinador saca de la frontier mientras `fetched < MaxPages`.
-   Cada resultado: `Sink.Page(p)`; para cada `Link` en ámbito, no nofollow, y
-   `p.NoFollow == false`, con `p.Depth+1 <= MaxDepth` → Push(depth+1).
-   `RedirectTo` en ámbito → Push(misma profundidad). `Canonical` no se encola.
-6. URL prohibida por robots → `Page{Blocked:true, Status:0}` al Sink, no cuenta
+2. Normaliza la semilla; `seedHost` = host normalizado (provisional: puede
+   cambiar, ver punto 4 — "Redirecciones de la semilla y cambio de ámbito").
+3. robots del host de la semilla (ver arriba). `delay = max(cfg.Delay,
+   robots.CrawlDelay)`.
+4. **Redirecciones de la semilla y cambio de ámbito.** Se obtiene la semilla
+   (profundidad 0) directamente (sin pasar por la frontier general) y se
+   sigue su posible cadena de redirecciones 3xx de profundidad 0:
+   - Cada salto de la cadena (incluida la semilla) respeta robots.txt y
+     `MaxPages` con las mismas reglas que el resto del motor (punto 7 y 8);
+     cada 3xx intermedio se entrega al `Sink` como `Page` normal y cuenta en
+     `Fetched`.
+   - Si el `Location` resuelto está en el mismo ámbito (`SameSite` contra el
+     `seedHost` actual), se sigue sin más: se obtiene esa URL a
+     profundidad 0 y se repite el proceso.
+   - Si el `Location` resuelto NO está en el mismo ámbito, el motor **adopta
+     ese host como `seedHost`** (el ámbito pasa a ser el nuevo host, con las
+     mismas reglas de `www.`/subdominios de `SameSite`), vuelve a obtener y
+     aplicar el robots.txt del nuevo host (mismas reglas 2xx/4xx/5xx que en
+     el punto 3; con `IgnoreRobots` no se pide para ningún host) y continúa
+     la cadena a profundidad 0 desde ese destino. Máximo **5 saltos de
+     cambio de host**; alcanzado el límite, esa 3xx se registra igual (ya
+     contada arriba) pero no se sigue.
+   - Un `Location` que resuelve a una URL ya vista en esta cadena (bucle de
+     redirecciones) detiene la cadena sin más.
+   - La cadena termina en la primera respuesta no-3xx (o 3xx sin `Location`
+     utilizable), en un error del Fetcher, en un bloqueo por robots.txt, o
+     al agotar el límite de saltos. Esa página final es la que aporta los
+     enlaces salientes a la frontier (con las mismas reglas del punto 6);
+     `seedHost`, el robots.txt aplicado y `delay` quedan fijados en lo que
+     resulte de este proceso. `Stats.FinalHost` refleja ese host efectivo;
+     `Stats.RobotsTxt` refleja el robots.txt del host final.
+   - Redirecciones de profundidad > 0 a otro host siguen sin seguirse (ver
+     punto 6): esta lógica de cambio de ámbito sólo aplica a la profundidad 0
+     derivada de la semilla.
+5. Sitemaps (ver arriba), ya con el host, robots y ámbito finales del
+   punto 4 (si la semilla no redirige, esto ocurre igual que antes, justo
+   tras resolverla).
+6. Bucle: `Concurrency` workers sobre el resto de la frontier (profundidad
+   ≥ 1, más lo que el punto 4 haya dejado pendiente); un limitador global
+   asegura que entre dos inicios de petición pasan al menos `delay` (un
+   `time.Ticker`/último inicio con mutex). El coordinador saca de la
+   frontier mientras `fetched < MaxPages`. Cada resultado: `Sink.Page(p)`;
+   para cada `Link` en ámbito, no nofollow, y `p.NoFollow == false`, con
+   `p.Depth+1 <= MaxDepth` → Push(depth+1). `RedirectTo` en ámbito →
+   Push(misma profundidad). `Canonical` no se encola.
+7. URL prohibida por robots → `Page{Blocked:true, Status:0}` al Sink, no cuenta
    en `Fetched`, cuenta en `Blocked`.
-7. Error del Fetcher → `Page{Error: err.Error()}`; cuenta en Fetched y Errors.
-8. Termina: frontier vacía y ningún worker ocupado, o `Fetched == MaxPages`
+8. Error del Fetcher → `Page{Error: err.Error()}`; cuenta en Fetched y Errors.
+9. Termina: frontier vacía y ningún worker ocupado, o `Fetched == MaxPages`
    (las URLs en cola restantes se cuentan en `Stats.Queued`), o ctx cancelado
    (se espera a los workers en vuelo, se devuelve `Stats` parciales y el error).
-9. Con `Concurrency == 1` el orden de páginas al Sink es determinista (BFS).
+10. Con `Concurrency == 1` el orden de páginas al Sink es determinista (BFS),
+    incluyendo la cadena de redirecciones de la semilla del punto 4, que
+    siempre se resuelve antes de arrancar los workers.
 
 ## Mensajes de `Validate()` (exactos)
 
@@ -221,5 +260,12 @@ sí misma; el motor la protege con un mutex.
   BFS determinista, MaxPages, MaxDepth, bloqueo por robots (4xx, 5xx, grupo
   específico), redirección en/fuera de ámbito, nofollow, sitemap con índice
   y gzip, cancelación por contexto, no-HTML sin enlaces.
+- Run — redirecciones de la semilla (punto 4 de "Motor"): la semilla
+  redirige a otro host y el ámbito pasa a ser ese host; cadena de dos saltos
+  de host; límite de 5 saltos (el 6º se registra y no se sigue);
+  redirección a otro host en profundidad 1, que sigue sin seguirse;
+  robots.txt del nuevo host obtenido y aplicado tras el cambio de ámbito
+  (`Stats.RobotsTxt`/`Stats.FinalHost` reflejan el host final); sitemaps
+  resueltos con el host final tras la cadena de la semilla.
 - HTTPFetcher con `httptest.Server`: User-Agent enviado, no sigue 301,
   Truncated con body > MaxBodyBytes, timeout.

@@ -46,7 +46,8 @@ type Stats struct {
 	Fetched, Blocked, Errors int // Fetched counts any request made (any status code)
 	Queued                   int // URLs left unvisited because of limits
 	RobotsTxt                string
-	Sitemaps                 int // URLs discovered via sitemaps
+	Sitemaps                 int    // URLs discovered via sitemaps
+	FinalHost                string // effective scope host, after following any seed-level cross-host redirect chain
 }
 
 // Run executes a full crawl and returns its statistics. It finishes when
@@ -71,7 +72,6 @@ func Run(ctx context.Context, cfg Config, f Fetcher, s Sink) (Stats, error) {
 	seedHost := su.Hostname()
 
 	fr := NewFrontier()
-	fr.Push(normalizedSeed, 0)
 
 	var stats Stats
 	robots := resolveRobots(ctx, cfg, f, su, &stats)
@@ -81,17 +81,26 @@ func Run(ctx context.Context, cfg Config, f Fetcher, s Sink) (Stats, error) {
 		delay = rd
 	}
 
-	collectSitemaps(ctx, cfg, f, robots, su, seedHost, fr, &stats)
-
-	state := &engineState{fr: fr}
 	limiter := &rateLimiter{delay: delay}
+
+	// Resolve the seed (and, if it redirects to another host, the chain of
+	// depth-0 redirects that follows it). This determines the crawl's
+	// effective scope before sitemaps or the concurrent worker pool ever
+	// run, per specs/002-crawler.md ("Redirecciones").
+	chain := resolveSeedChain(ctx, cfg, f, s, normalizedSeed, seedHost, su, robots, limiter, fr, &stats)
+
+	stats.FinalHost = chain.host
+
+	collectSitemaps(ctx, cfg, f, chain.robots, chain.base, chain.host, fr, &stats)
+
+	state := &engineState{fr: fr, fetched: chain.fetched, blocked: chain.blocked, errs: chain.errs}
 
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runWorker(ctx, cfg, f, s, robots, seedHost, state, limiter)
+			runWorker(ctx, cfg, f, s, chain.robots, chain.host, state, limiter)
 		}()
 	}
 	wg.Wait()
@@ -105,6 +114,130 @@ func Run(ctx context.Context, cfg Config, f Fetcher, s Sink) (Stats, error) {
 		return stats, fmt.Errorf("crawler: crawl cancelled: %w", ctx.Err())
 	}
 	return stats, nil
+}
+
+// maxSeedHostHops bounds how many times the seed's own redirect chain may
+// switch to a different host before the crawler gives up following it.
+const maxSeedHostHops = 5
+
+// seedChainResult carries the outcome of resolving the seed's depth-0
+// redirect chain: the effective scope (host, robots, courtesy delay and a
+// base URL for resolving relative sitemap locations) plus every counter it
+// consumed.
+type seedChainResult struct {
+	host    string
+	robots  *Robots
+	base    *url.URL
+	fetched int
+	blocked int
+	errs    int
+}
+
+// resolveSeedChain fetches the seed URL and follows any depth-0 redirect
+// chain from it, per specs/002-crawler.md:
+//
+//   - A same-host redirect is followed within the same scope.
+//   - A cross-host redirect makes the crawler adopt the new host as its
+//     scope (seedHost), re-fetch that host's robots.txt (same 2xx/4xx/5xx
+//     rules, skipped entirely with IgnoreRobots), and continue the chain
+//     from there — up to maxSeedHostHops host switches. Once the limit is
+//     reached, the redirect is recorded but not followed.
+//
+// Every hop (including intermediate 3xx responses) is delivered to s as a
+// normal Page and counted in the returned fetched/blocked/errs counters.
+// Once the chain lands on a non-redirect page (or errors, is blocked, or
+// hits the hop limit), that page's outbound links are pushed into fr at
+// depth 1, exactly as the main engine would for any other page.
+func resolveSeedChain(ctx context.Context, cfg Config, f Fetcher, s Sink, seedURL, seedHost string, su *url.URL, robots *Robots, limiter *rateLimiter, fr *Frontier, stats *Stats) seedChainResult {
+	currentURL := seedURL
+	currentHost := seedHost
+	currentRobots := robots
+	currentBase := su
+	fetched, blocked, errs, hops := 0, 0, 0, 0
+
+	result := func() seedChainResult {
+		return seedChainResult{host: currentHost, robots: currentRobots, base: currentBase, fetched: fetched, blocked: blocked, errs: errs}
+	}
+
+	for {
+		// Mirrors runWorker's gate: MaxPages is checked before anything
+		// else, including the robots.txt check, so a URL that cannot be
+		// fetched within budget is left queued (via fr.Push, which also
+		// marks it seen) rather than silently dropped.
+		if fetched >= cfg.MaxPages {
+			fr.Push(currentURL, 0)
+			return result()
+		}
+
+		if !currentRobots.Allowed(cfg.RobotsToken, robotsPath(currentURL)) {
+			blocked++
+			fr.seen[currentURL] = true
+			s.Page(Page{URL: currentURL, Depth: 0, Blocked: true, FetchedAt: time.Now()})
+			return result()
+		}
+
+		page := fetchAndBuildPage(ctx, cfg, f, currentHost, currentURL, 0, limiter)
+		fetched++
+		// Every hop is fetched directly here, bypassing the frontier's own
+		// Push/Pop bookkeeping, so it must be marked seen by hand: a later
+		// page linking back to any URL in this chain (very often the seed
+		// itself) must not cause it to be queued and fetched again.
+		fr.seen[currentURL] = true
+
+		if page.Error != "" {
+			errs++
+			s.Page(page)
+			return result()
+		}
+
+		if page.RedirectTo == "" {
+			// Not a redirect (or a redirect with no usable Location): the
+			// chain ends here.
+			s.Page(page)
+			enqueueLinks(page, cfg, currentHost, fr)
+			return result()
+		}
+
+		target := page.RedirectTo
+		tu, err := url.Parse(target)
+		if err != nil {
+			s.Page(page)
+			return result()
+		}
+
+		if fr.seen[target] {
+			// A redirect loop (or a redirect back to a URL already
+			// resolved elsewhere in the chain): stop following it, but
+			// the loop itself is not an error worth reporting beyond the
+			// page already recorded above.
+			s.Page(page)
+			return result()
+		}
+
+		if SameSite(currentHost, tu.Hostname(), cfg.IncludeSubdomains) {
+			s.Page(page)
+			currentURL = target
+			continue
+		}
+
+		// Cross-host redirect at depth 0.
+		if hops >= maxSeedHostHops {
+			s.Page(page)
+			return result()
+		}
+		s.Page(page)
+		hops++
+		currentURL = target
+		currentHost = tu.Hostname()
+		currentBase = tu
+		currentRobots = resolveRobots(ctx, cfg, f, tu, stats)
+
+		newDelay := cfg.Delay
+		if rd := currentRobots.CrawlDelay(cfg.RobotsToken); rd > newDelay {
+			newDelay = rd
+		}
+		limiter.delay = newDelay
+	}
 }
 
 // resolveRobots fetches and parses robots.txt for the seed's host, per the
