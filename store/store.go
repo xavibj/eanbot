@@ -81,6 +81,7 @@ func Open(path string) (*Store, error) {
 	if err := checkDirWritable(path); err != nil {
 		return nil, err
 	}
+	ensureSQLiteTempDir(filepath.Dir(path), sqliteTempCandidates())
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -127,6 +128,49 @@ func checkDirWritable(path string) error {
 	probe.Close()
 	os.Remove(name)
 	return nil
+}
+
+// sqliteTempCandidates lists the directories SQLite tries for temporary
+// files when SQLITE_TMPDIR is unset, in SQLite's own order.
+func sqliteTempCandidates() []string {
+	return []string{os.Getenv("TMPDIR"), "/var/tmp", "/usr/tmp", "/tmp", "."}
+}
+
+// ensureSQLiteTempDir makes sure SQLite will find a writable temporary
+// directory. Large sorts and group-bys (summaries, broken links) spill to temp
+// files; when none of SQLite's candidate directories is writable, as in a
+// scratch container image, every such query fails with "disk I/O error
+// (6410)" (SQLITE_IOERR_GETTEMPPATH). If SQLITE_TMPDIR is unset and no
+// candidate is a writable directory, point SQLITE_TMPDIR at the database
+// directory, which is known to be writable.
+func ensureSQLiteTempDir(dbDir string, candidates []string) {
+	if os.Getenv("SQLITE_TMPDIR") != "" {
+		return
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		if dirWritable(dir) {
+			return
+		}
+	}
+	os.Setenv("SQLITE_TMPDIR", dbDir)
+}
+
+func dirWritable(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	probe, err := os.CreateTemp(dir, ".eanbot-write-probe-*")
+	if err != nil {
+		return false
+	}
+	name := probe.Name()
+	probe.Close()
+	os.Remove(name)
+	return true
 }
 
 func (s *Store) init() error {

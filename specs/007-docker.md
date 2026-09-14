@@ -18,7 +18,9 @@ el fichero SQLite montado en `/data`.
    rojo).
 3. **Runtime** (`scratch`): binario en `/eanbot`, certificados CA de Alpine en
    `/etc/ssl/certs/ca-certificates.crt` (imprescindibles para rastrear HTTPS),
-   `USER 65532:65532`, `VOLUME /data`, `EXPOSE 8345`,
+   `/tmp` vacío con permisos `1777`, `ENV SQLITE_TMPDIR=/data` (SQLite
+   necesita un directorio temporal para ordenar tablas grandes; sin él falla con
+   `disk I/O error (6410)`), `USER 65532:65532`, `VOLUME /data`, `EXPOSE 8345`,
    `ENTRYPOINT ["/eanbot"]`, `CMD ["serve", "-addr", ":8345", "-db",
    "/data/eanbot.db"]`.
 

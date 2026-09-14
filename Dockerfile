@@ -23,11 +23,17 @@ COPY --from=web /src/server/static/ server/static/
 RUN go vet ./... && go test ./...
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags='-s -w' -o /out/eanbot ./cmd/eanbot
+RUN mkdir -p /out/tmp
 
 # ---- 3. Runtime ----------------------------------------------------------------
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/eanbot /eanbot
+# SQLite spills large sorts (summaries, broken links) to temp files; scratch has
+# no /tmp and / is not writable by the runtime user, so provide both a /tmp and
+# an explicit temp dir on the data volume.
+COPY --from=build --chown=65532:65532 --chmod=1777 /out/tmp /tmp
+ENV SQLITE_TMPDIR=/data
 USER 65532:65532
 VOLUME ["/data"]
 EXPOSE 8345

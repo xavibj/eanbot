@@ -48,6 +48,10 @@ docker exec eanbot /eanbot crawl https://xavi.net -db /data/eanbot.db
 Con un directorio del host en vez de volumen (`-v $PWD/data:/data`), hazlo
 escribible por el contenedor: `chown -R 65532:65532 data` (o `--user $(id -u)`).
 
+La imagen define `SQLITE_TMPDIR=/data`: SQLite necesita un directorio temporal
+para ordenar tablas grandes (resúmenes, enlaces rotos) y en `scratch` no hay
+`/tmp`; sin él las consultas fallan con `disk I/O error (6410)`.
+
 Detalles y verificación en `specs/007-docker.md`.
 
 ## Desarrollo

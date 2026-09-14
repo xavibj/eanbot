@@ -789,3 +789,28 @@ func TestOpen_UnwritableDirectory(t *testing.T) {
 		t.Fatalf("error should explain the unwritable directory and the Docker uid, got: %v", err)
 	}
 }
+
+func TestEnsureSQLiteTempDir(t *testing.T) {
+	writable := t.TempDir()
+	dbDir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	tests := []struct {
+		name       string
+		env        string // current SQLITE_TMPDIR value
+		candidates []string
+		want       string // expected SQLITE_TMPDIR after the call ("" = untouched)
+	}{
+		{"already set", "/already", []string{missing}, "/already"},
+		{"a candidate is writable", "", []string{missing, writable}, ""},
+		{"no candidate is writable", "", []string{missing, "", "/proc"}, dbDir},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SQLITE_TMPDIR", tc.env)
+			ensureSQLiteTempDir(dbDir, tc.candidates)
+			if got := os.Getenv("SQLITE_TMPDIR"); got != tc.want {
+				t.Fatalf("SQLITE_TMPDIR = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

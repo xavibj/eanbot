@@ -21,6 +21,15 @@ español que nombra el directorio, el uid del proceso y la solución para
 Docker (`chown 65532:65532 <dir>`), en vez del críptico
 `attempt to write a readonly database (1544)` de SQLite en WAL.
 
+`Open` también garantiza un directorio temporal para SQLite: las consultas
+de resumen y enlaces rotos ordenan y agrupan tablas grandes y se vuelcan a
+ficheros temporales; SQLite los busca en `SQLITE_TMPDIR`, `TMPDIR`,
+`/var/tmp`, `/usr/tmp`, `/tmp` y el cwd, y si ninguno es escribible falla con
+`disk I/O error (6410)` (`SQLITE_IOERR_GETTEMPPATH`), que es lo que ocurre en
+una imagen `scratch`. Si `SQLITE_TMPDIR` no está definida y ninguno de esos
+candidatos es un directorio escribible, `Open` fija `SQLITE_TMPDIR` al
+directorio de la BBDD antes de abrir la conexión.
+
 ## Esquema
 
 ```sql
