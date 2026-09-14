@@ -50,8 +50,12 @@ interno"]}`.
   "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true
 }
 ```
-Campos ausentes o 0 → valor por defecto (`WithDefaults`). En `POST` solo
-`seed` es obligatorio. El objeto almacenado es el resultante tras defaults.
+Campos ausentes o 0 → valor por defecto (`WithDefaults`), **excepto
+`delay_ms`**: `crawler.WithDefaults` respeta `Delay == 0` como valor explícito
+(sin cortesía), así que el servidor decodifica `delay_ms` como puntero (`*int`)
+y aplica 500 solo cuando el campo no viene en el JSON; `"delay_ms": 0`
+significa sin retardo. En `POST` solo `seed` es obligatorio. El objeto
+almacenado es el resultante tras defaults.
 
 ### Endpoints
 

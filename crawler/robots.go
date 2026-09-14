@@ -1,0 +1,229 @@
+package crawler
+
+import (
+	"bufio"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Robots holds a parsed robots.txt file.
+type Robots struct {
+	groups      []robotsGroup
+	sitemapURLs []string
+	disallowAll bool
+}
+
+type robotsGroup struct {
+	agents        []string // lower-cased user-agent values, "*" included as-is
+	rules         []robotsRule
+	crawlDelay    time.Duration
+	hasCrawlDelay bool
+}
+
+type robotsRule struct {
+	allow   bool
+	pattern string
+}
+
+// ParseRobots parses a robots.txt document from r. It never returns nil.
+func ParseRobots(r io.Reader) *Robots {
+	rob := &Robots{}
+
+	var current *robotsGroup
+	ruleSeen := false
+
+	flush := func() {
+		if current != nil {
+			rob.groups = append(rob.groups, *current)
+		}
+	}
+	startGroup := func() {
+		current = &robotsGroup{}
+		ruleSeen = false
+	}
+
+	scanner := bufio.NewScanner(r)
+	// robots.txt files can contain very long lines; use a generous buffer.
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.IndexByte(line, '#'); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		field := strings.ToLower(strings.TrimSpace(line[:colon]))
+		value := strings.TrimSpace(line[colon+1:])
+
+		switch field {
+		case "user-agent":
+			if current != nil && ruleSeen {
+				flush()
+				startGroup()
+			} else if current == nil {
+				startGroup()
+			}
+			current.agents = append(current.agents, strings.ToLower(value))
+		case "allow", "disallow":
+			if current == nil {
+				continue
+			}
+			if value == "" {
+				// An empty Disallow means "allow everything"; an empty
+				// Allow has no effect either. Skip both: a rule-less group
+				// already defaults to allow.
+				ruleSeen = true
+				continue
+			}
+			current.rules = append(current.rules, robotsRule{allow: field == "allow", pattern: value})
+			ruleSeen = true
+		case "crawl-delay":
+			if current == nil {
+				continue
+			}
+			if secs, err := strconv.ParseFloat(value, 64); err == nil && secs >= 0 {
+				current.crawlDelay = time.Duration(secs * float64(time.Second))
+				current.hasCrawlDelay = true
+			}
+			ruleSeen = true
+		case "sitemap":
+			if value != "" {
+				rob.sitemapURLs = append(rob.sitemapURLs, value)
+			}
+		}
+	}
+	flush()
+
+	return rob
+}
+
+// AllowAll returns a Robots value that permits crawling everything.
+func AllowAll() *Robots {
+	return &Robots{}
+}
+
+// DisallowAll returns a Robots value that forbids crawling anything.
+func DisallowAll() *Robots {
+	return &Robots{disallowAll: true}
+}
+
+// Allowed reports whether path (which includes the query string, if any) may
+// be fetched by a crawler identifying itself with token.
+func (r *Robots) Allowed(token, path string) bool {
+	if r == nil {
+		return true
+	}
+	if r.disallowAll {
+		return false
+	}
+	g := r.selectGroup(token)
+	if g == nil {
+		return true
+	}
+	return matchRules(g.rules, path)
+}
+
+// CrawlDelay returns the Crawl-delay declared for token's group, or 0 if
+// none was declared.
+func (r *Robots) CrawlDelay(token string) time.Duration {
+	if r == nil {
+		return 0
+	}
+	g := r.selectGroup(token)
+	if g == nil || !g.hasCrawlDelay {
+		return 0
+	}
+	return g.crawlDelay
+}
+
+// Sitemaps returns every "Sitemap:" URL declared in the document.
+func (r *Robots) Sitemaps() []string {
+	if r == nil {
+		return nil
+	}
+	return r.sitemapURLs
+}
+
+// selectGroup picks the group whose User-agent contains token
+// (case-insensitive substring match); falling back to the "*" group, or nil
+// if neither exists.
+func (r *Robots) selectGroup(token string) *robotsGroup {
+	token = strings.ToLower(token)
+	var star *robotsGroup
+	for i := range r.groups {
+		g := &r.groups[i]
+		for _, a := range g.agents {
+			if a == "*" {
+				if star == nil {
+					star = g
+				}
+				continue
+			}
+			if token != "" && strings.Contains(a, token) {
+				return g
+			}
+		}
+	}
+	return star
+}
+
+// matchRules applies the "longest pattern wins, Allow wins ties" algorithm
+// to path, returning true when no rule matches (default allow).
+func matchRules(rules []robotsRule, path string) bool {
+	bestLen := -1
+	bestAllow := true
+	matched := false
+
+	for _, rule := range rules {
+		re := compileRobotsPattern(rule.pattern)
+		if re == nil || !re.MatchString(path) {
+			continue
+		}
+		length := len(rule.pattern)
+		if length > bestLen || (length == bestLen && rule.allow) {
+			bestLen = length
+			bestAllow = rule.allow
+			matched = true
+		}
+	}
+
+	if !matched {
+		return true
+	}
+	return bestAllow
+}
+
+// compileRobotsPattern turns a robots.txt path pattern (where "*" matches
+// any sequence of characters and a trailing "$" anchors the end of the
+// match) into a regular expression anchored at the start of the string.
+func compileRobotsPattern(pattern string) *regexp.Regexp {
+	endAnchor := strings.HasSuffix(pattern, "$")
+	p := pattern
+	if endAnchor {
+		p = strings.TrimSuffix(p, "$")
+	}
+	parts := strings.Split(p, "*")
+	for i, part := range parts {
+		parts[i] = regexp.QuoteMeta(part)
+	}
+	expr := "^" + strings.Join(parts, ".*")
+	if endAnchor {
+		expr += "$"
+	}
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		return nil
+	}
+	return re
+}

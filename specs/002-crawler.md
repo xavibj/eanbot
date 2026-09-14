@@ -11,7 +11,9 @@ type Config struct {
     MaxPages          int           // >0; por defecto 500
     MaxDepth          int           // >=0; por defecto 10
     Concurrency       int           // >0; por defecto 4
-    Delay             time.Duration // >=0; por defecto 500ms
+    Delay             time.Duration // >=0; por defecto 500ms (0 es un valor
+                                     // explícito válido: "sin cortesía",
+                                     // como los bools, WithDefaults no lo toca)
     Timeout           time.Duration // por petición; por defecto 15s
     MaxBodyBytes      int64         // por defecto 2 MiB
     UserAgent         string        // por defecto "EANBot/0.1 (+https://xavi.net)"
@@ -23,7 +25,7 @@ type Config struct {
 
 func Defaults() Config                  // los valores de specs/001
 func (c Config) Validate() []string     // TODAS las violaciones, texto en español (ver abajo)
-func (c Config) WithDefaults() Config   // rellena ceros con Defaults() (no toca bools)
+func (c Config) WithDefaults() Config   // rellena ceros con Defaults() (no toca bools ni Delay)
 
 type Response struct {
     Status      int
