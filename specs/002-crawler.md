@@ -22,6 +22,8 @@ type Config struct {
     IgnoreRobots      bool
     UseSitemaps       bool          // por defecto true (ver Defaults)
     Headers           map[string]string // cabeceras extra en TODAS las peticiones (páginas, robots, sitemaps)
+    Origin            string        // "ip" o "ip:puerto" del servidor de origen (saltar Cloudflare); "" = DNS normal
+    InsecureTLS       bool          // no verificar el certificado TLS (Origin CA de Cloudflare, certificados propios)
 }
 
 func Defaults() Config                  // los valores de specs/001
@@ -50,6 +52,21 @@ func NewHTTPFetcher(userAgent string, timeout time.Duration, maxBody int64) *HTT
 // HTTPFetcher.Headers (campo exportado, map[string]string) se añade a cada
 // petición DESPUÉS de User-Agent y Accept, así que puede sobrescribirlos.
 // Los nombres se canonicalizan (http.CanonicalHeaderKey).
+//
+// Origen forzado (equivalente a `curl --resolve`): HTTPFetcher tiene los campos
+// exportados `Origin` ("ip" o "ip:puerto"), `OriginHost` (host de la semilla
+// normalizado) e `InsecureTLS`. Usa un http.Transport propio (clon de
+// http.DefaultTransport) cuyo DialContext, cuando el host de la petición
+// coincide con OriginHost (sin prefijo "www." en ambos, sin distinguir
+// mayúsculas), conecta a Origin en vez de resolver DNS; si Origin no lleva
+// puerto se usa el de la petición (80/443 por defecto). La cabecera Host y el
+// SNI de TLS siguen siendo el host de la URL (Go los toma de la URL; no se
+// toca TLSClientConfig.ServerName). Peticiones a otros hosts (p. ej. el
+// destino de una redirección de la semilla a otro dominio) se conectan
+// normalmente: el override NO sigue al host nuevo tras un cambio de ámbito.
+// robots.txt y sitemaps del host de la semilla pasan por el mismo dial.
+// InsecureTLS pone TLSClientConfig.InsecureSkipVerify; tiene efecto también
+// sin Origin.
 
 type Link struct {
     URL      string // absoluta y normalizada
@@ -252,6 +269,8 @@ sí misma; el motor la protege con un mutex.
 - `cabecera no válida: "<nombre>"` (nombre vacío o con caracteres fuera de un
   token HTTP: letras, dígitos y `!#$%&'*+-.^_`|~`; uno por cabecera inválida)
 - `valor de cabecera no válido: "<nombre>"` (valor con CR o LF)
+- `origin no válido: "<valor>"` (no es una IP, ni `ip:puerto` con puerto
+  1-65535; IPv6 con puerto va entre corchetes: `[::1]:8443`)
 
 ## Tests exigidos (mínimo)
 
@@ -279,3 +298,15 @@ sí misma; el motor la protege con un mutex.
   en robots.txt (nombre canonicalizado) y que una cabecera `User-Agent` en
   `Headers` sobrescribe la configurada.
 - Validate: cabeceras con nombre inválido y valor con salto de línea.
+- Validate: `Origin` inválido (`abc`, `1.2.3`, `1.2.3.4:x`, `1.2.3.4:0`) y válido
+  (`1.2.3.4`, `1.2.3.4:8443`, `::1`, `[::1]:8443`).
+- HTTPFetcher con origen forzado: `httptest.NewServer` y `httptest.NewTLSServer`
+  escuchando en 127.0.0.1; petición a `http(s)://sitio.test/` con
+  `Origin = "127.0.0.1:<puerto>"` y `OriginHost = "sitio.test"` → el handler
+  recibe `r.Host == "sitio.test"` y en TLS `r.TLS.ServerName == "sitio.test"`
+  (con `InsecureTLS`, porque el certificado del servidor de test no es para ese
+  nombre); sin `InsecureTLS` la petición TLS falla por verificación; `Origin`
+  sin puerto → se usa el puerto de la URL (test con un listener en un puerto
+  libre y URL con ese puerto explícito); petición a un host que no coincide
+  con `OriginHost` (`otro.invalid`) no se redirige y falla al resolver;
+  `www.sitio.test` sí coincide con `OriginHost = "sitio.test"`.

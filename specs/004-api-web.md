@@ -48,9 +48,18 @@ interno"]}`.
   "timeout_ms": 15000, "max_body_bytes": 2097152,
   "user_agent": "EANBot/0.1 (+https://xavi.net)",
   "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true,
-  "headers": {"x-ean-client": "XXXXXXXX"}
+  "headers": {"x-ean-client": "XXXXXXXX"},
+  "origin": "172.16.0.10", "insecure_tls": false
 }
 ```
+
+`origin` (`ip` o `ip:puerto`, opcional) conecta directamente al servidor de
+origen para el host de la semilla, saltando Cloudflare, manteniendo `Host` y
+SNI (ver spec 002). `insecure_tls` (bool, opcional, por defecto `false`)
+desactiva la verificación del certificado. El servidor rellena
+`HTTPFetcher.OriginHost` con el host de `crawler.Normalize(seed)`. Ambos se
+almacenan siempre en el config (`""` / `false` si no vienen). Los errores de
+validación son los de `crawler.Config.Validate`.
 
 `headers` es un objeto opcional nombre → valor (cadenas); se envía en todas
 las peticiones del rastreo (útil para que un WAF como Cloudflare no bloquee
@@ -116,7 +125,12 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      sitemaps, y un `textarea` «Cabeceras adicionales» (una por línea,
      formato `Nombre: valor`; líneas vacías ignoradas; una línea sin `:` se
      rechaza en cliente con el mensaje «cabecera sin “:” en la línea N»).
-     Se envía como objeto `headers`. Inputs numéricos como `type="text" inputmode="numeric"` con
+     Se envía como objeto `headers`. Campo «IP del origen (saltar
+     Cloudflare)» (`type="text"`, placeholder `172.16.0.10`, ayuda: «ip o
+     ip:puerto; la cabecera Host y el SNI siguen siendo los del sitio») que se
+     envía como `origin` solo si no está vacío, y checkbox «No verificar el
+     certificado TLS» (`insecure_tls`, siempre enviado; ayuda: «solo para
+     certificados Origin CA de Cloudflare o propios»). Inputs numéricos como `type="text" inputmode="numeric"` con
      coerción defensiva. Errores `400` se muestran en lista bajo el
      formulario; controles deshabilitados durante la petición; error de red
      → «la petición ha fallado». Al crear, navega a `#/crawls/{id}`.
@@ -128,7 +142,9 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      paginación (100 por página); clic en fila → `#/crawls/{id}/pages/{pid}`.
      Enlaces rotos: por cada página rota, URL, código/error y lista de
      referrers (URL enlazable a su detalle si existe, y texto del ancla).
-     Auto-refresco cada 2 s mientras `running`.
+     Auto-refresco cada 2 s mientras `running`. En la línea de config se
+     muestra `origen: <ip>` si `config.origin` no está vacío y `tls sin
+     verificar` si `config.insecure_tls`.
   4. **Detalle de página**: todos los campos de `page` en una lista de
      definición; enlaces salientes (URL, texto, nofollow, en ámbito) y
      entrantes (URL origen, texto).
@@ -138,7 +154,10 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
 
 healthz; POST con `headers` → el Fetcher falso recibe la cabecera en cada
 petición (el `NewFetcher` inyectado recibe la `Config` con `Headers`) y el
-config almacenado la incluye; POST con cabecera inválida → 400; POST válido → 201 y crawl en store, y tras esperar a que termine
+config almacenado la incluye; POST con cabecera inválida → 400; POST con `origin` e `insecure_tls` → el
+Fetcher inyectado recibe la Config con ambos y el config almacenado los
+incluye (y `"origin":"","insecure_tls":false` cuando no vienen); POST con
+`origin` inválido → 400 `origin no válido: "..."`; POST válido → 201 y crawl en store, y tras esperar a que termine
 (polling a GET hasta `running == false`, con timeout) el summary coincide con
 lo que sirvió el Fetcher falso; POST inválido → 400 con TODOS los errores;
 JSON malformado; 405 con Allow; 404 JSON en id inexistente, id no numérico,
