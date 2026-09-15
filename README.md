@@ -24,8 +24,18 @@ el bot adopta el host destino como ámbito del rastreo.
 Flags de `crawl`: `-db`, `-max-pages`, `-max-depth`, `-concurrency`, `-delay`,
 `-timeout`, `-user-agent`, `-include-subdomains`, `-ignore-robots`,
 `-no-sitemaps`, `-header "Nombre: valor"` (repetible; p. ej. `-header "x-ean-client: XXXX"`
-para que Cloudflare no bloquee al bot), `-json`, `-quiet`. `Ctrl-C` cancela y
-guarda lo rastreado. En la API y la web, las cabeceras van en `config.headers`.
+para que Cloudflare no bloquee al bot), `-origin ip[:puerto]` (conecta
+directamente al servidor de origen del host de la semilla, saltando Cloudflare;
+`Host` y SNI siguen siendo los del sitio, como `curl --resolve`),
+`-insecure-tls` (no verificar el certificado, para Origin CA de Cloudflare o
+certificados propios), `-json`, `-quiet`. `Ctrl-C` cancela y guarda lo
+rastreado. En la API y la web, esas opciones van en `config.headers`,
+`config.origin` y `config.insecure_tls`.
+
+```sh
+./bin/eanbot crawl https://fo-test.electricautomationnetwork.com \
+    -origin 172.16.0.10 -insecure-tls -header "x-ean-client: XXXXXXXX"
+```
 
 ## API
 

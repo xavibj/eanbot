@@ -7,8 +7,10 @@ package crawler
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +30,8 @@ type Config struct {
 	IgnoreRobots      bool
 	UseSitemaps       bool              // default true (see Defaults)
 	Headers           map[string]string // extra headers sent on ALL requests (pages, robots, sitemaps)
+	Origin            string            // "ip" or "ip:port" of the origin server (bypass Cloudflare); "" = normal DNS
+	InsecureTLS       bool              // skip TLS certificate verification (Cloudflare Origin CA, self-signed certs)
 }
 
 // Defaults returns the default configuration values, as fixed in
@@ -88,7 +92,48 @@ func (c Config) Validate() []string {
 		}
 	}
 
+	if c.Origin != "" {
+		if _, _, err := SplitOrigin(c.Origin); err != nil {
+			errs = append(errs, fmt.Sprintf("origin no válido: %q", c.Origin))
+		}
+	}
+
 	return errs
+}
+
+// SplitOrigin parses an Origin value ("ip" or "ip:port") into its host and
+// port parts, as documented on Config.Origin. host is always a valid IP
+// address (IPv4 or IPv6, per net.ParseIP); port is "" when origin carries no
+// port, or a decimal string in [1, 65535] otherwise. IPv6 addresses with a
+// port must be bracketed ("[::1]:8443"); without a port they are not
+// ("::1").
+func SplitOrigin(origin string) (host, port string, err error) {
+	if origin == "" {
+		return "", "", fmt.Errorf("crawler: empty origin")
+	}
+
+	// A bracketed host, or exactly one colon, means "host:port" (a bare
+	// IPv6 address has either zero colons — impossible for a valid IP — or
+	// two or more, from "::").
+	if strings.HasPrefix(origin, "[") || strings.Count(origin, ":") == 1 {
+		h, p, err := net.SplitHostPort(origin)
+		if err != nil {
+			return "", "", err
+		}
+		if net.ParseIP(h) == nil {
+			return "", "", fmt.Errorf("crawler: invalid origin host %q", h)
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", "", fmt.Errorf("crawler: invalid origin port %q", p)
+		}
+		return h, p, nil
+	}
+
+	if net.ParseIP(origin) == nil {
+		return "", "", fmt.Errorf("crawler: invalid origin host %q", origin)
+	}
+	return origin, "", nil
 }
 
 // isValidHeaderName reports whether name is a valid HTTP token: one or more

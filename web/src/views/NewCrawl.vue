@@ -16,6 +16,8 @@ const form = reactive({
   ignore_robots: false,
   use_sitemaps: true,
   headers: '',
+  origin: '',
+  insecure_tls: false,
 })
 
 const serverErrors = ref([])
@@ -83,6 +85,9 @@ function buildBody(headers) {
   body.include_subdomains = !!form.include_subdomains
   body.ignore_robots = !!form.ignore_robots
   body.use_sitemaps = !!form.use_sitemaps
+  const origin = String(form.origin ?? '').trim()
+  if (origin !== '') body.origin = origin
+  body.insecure_tls = !!form.insecure_tls
   if (headers && Object.keys(headers).length > 0) body.headers = headers
   return body
 }
@@ -243,6 +248,35 @@ async function onSubmit() {
           @input="setHeaders"
         ></textarea>
         <span class="hint">Una por línea, con formato <code>Nombre: valor</code>.</span>
+      </div>
+
+      <div class="field field--wide" style="margin-top: 14px">
+        <label for="origin">IP del origen (saltar Cloudflare)</label>
+        <input
+          id="origin"
+          class="input-mono"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="172.16.0.10"
+          :value="form.origin"
+          :disabled="sending"
+          @input="setText('origin', $event)"
+        />
+        <span class="hint">ip o ip:puerto; la cabecera Host y el SNI siguen siendo los del sitio.</span>
+      </div>
+
+      <div class="checks" style="margin-top: 14px">
+        <label class="check">
+          <input
+            type="checkbox"
+            :checked="form.insecure_tls"
+            :disabled="sending"
+            @change="setBool('insecure_tls', $event)"
+          />
+          No verificar el certificado TLS
+        </label>
+        <span class="hint">Solo para certificados Origin CA de Cloudflare o propios.</span>
       </div>
 
       <div v-if="errors.length" style="margin-top: 16px">

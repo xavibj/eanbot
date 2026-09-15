@@ -234,6 +234,8 @@ type configDoc struct {
 	IgnoreRobots      bool              `json:"ignore_robots"`
 	UseSitemaps       *bool             `json:"use_sitemaps"`
 	Headers           map[string]string `json:"headers"`
+	Origin            string            `json:"origin"`
+	InsecureTLS       bool              `json:"insecure_tls"`
 }
 
 // configToCrawlerConfig converts a decoded request body into a
@@ -253,6 +255,8 @@ func configToCrawlerConfig(doc configDoc) crawler.Config {
 		IncludeSubdomains: doc.IncludeSubdomains,
 		IgnoreRobots:      doc.IgnoreRobots,
 		Headers:           doc.Headers,
+		Origin:            doc.Origin,
+		InsecureTLS:       doc.InsecureTLS,
 	}
 
 	if doc.DelayMs != nil {
@@ -292,6 +296,8 @@ func configToJSON(cfg crawler.Config) (json.RawMessage, error) {
 		IgnoreRobots:      cfg.IgnoreRobots,
 		UseSitemaps:       &useSitemaps,
 		Headers:           headers,
+		Origin:            cfg.Origin,
+		InsecureTLS:       cfg.InsecureTLS,
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

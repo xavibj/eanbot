@@ -119,6 +119,70 @@ func TestConfigValidate(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			name: "invalid origin: not an IP",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "abc",
+			},
+			want: []string{`origin no válido: "abc"`},
+		},
+		{
+			name: "invalid origin: incomplete IPv4",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "1.2.3",
+			},
+			want: []string{`origin no válido: "1.2.3"`},
+		},
+		{
+			name: "invalid origin: non-numeric port",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "1.2.3.4:x",
+			},
+			want: []string{`origin no válido: "1.2.3.4:x"`},
+		},
+		{
+			name: "invalid origin: port zero",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "1.2.3.4:0",
+			},
+			want: []string{`origin no válido: "1.2.3.4:0"`},
+		},
+		{
+			name: "valid origin: bare IPv4",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "1.2.3.4",
+			},
+			want: nil,
+		},
+		{
+			name: "valid origin: IPv4 with port",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "1.2.3.4:8443",
+			},
+			want: nil,
+		},
+		{
+			name: "valid origin: bare IPv6",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "::1",
+			},
+			want: nil,
+		},
+		{
+			name: "valid origin: bracketed IPv6 with port",
+			cfg: Config{
+				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
+				Origin: "[::1]:8443",
+			},
+			want: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -173,5 +237,17 @@ func TestConfigWithDefaults(t *testing.T) {
 	custom := Config{Seed: "https://example.com/", MaxPages: 42}
 	if got := custom.WithDefaults().MaxPages; got != 42 {
 		t.Errorf("MaxPages = %d, want 42 (unchanged)", got)
+	}
+
+	// WithDefaults must never touch Origin/InsecureTLS: "" and false are
+	// legitimate explicit values (no forced origin, verify TLS), not
+	// sentinels for "unset".
+	originCfg := Config{Seed: "https://example.com/", Origin: "1.2.3.4", InsecureTLS: true}
+	filledOrigin := originCfg.WithDefaults()
+	if filledOrigin.Origin != "1.2.3.4" {
+		t.Errorf("Origin = %q, want unchanged %q", filledOrigin.Origin, "1.2.3.4")
+	}
+	if !filledOrigin.InsecureTLS {
+		t.Error("WithDefaults() must not touch InsecureTLS")
 	}
 }

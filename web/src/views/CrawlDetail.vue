@@ -73,6 +73,8 @@ const headerNames = computed(() => {
   return Object.keys(raw).join(', ')
 })
 
+const originLabel = computed(() => String(config.value?.origin ?? '').trim())
+
 const rangeLabel = computed(() => {
   if (total.value === 0) return '0 páginas'
   const from = offset.value + 1
@@ -287,6 +289,8 @@ onBeforeUnmount(() => {
           <span v-if="config.ignore_robots">robots.txt ignorado</span>
           <span v-if="config.use_sitemaps">sitemaps</span>
           <span v-if="headerNames">cabeceras: {{ headerNames }}</span>
+          <span v-if="originLabel">origen: {{ originLabel }}</span>
+          <span v-if="config.insecure_tls">tls sin verificar</span>
         </p>
       </div>
       <div class="btn-row">

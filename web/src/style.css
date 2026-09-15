@@ -188,6 +188,11 @@ textarea {
   min-height: 4.5em;
 }
 
+.input-mono {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+}
+
 code {
   font-family: var(--mono);
   font-size: 0.86em;

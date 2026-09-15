@@ -18,7 +18,8 @@ const usageText = `Uso:
   eanbot crawl <url> [-db eanbot.db] [-max-pages 500] [-max-depth 10]
                      [-concurrency 4] [-delay 500ms] [-timeout 15s]
                      [-user-agent UA] [-include-subdomains] [-ignore-robots]
-                     [-no-sitemaps] [-header "Nombre: valor"]... [-json] [-quiet]
+                     [-no-sitemaps] [-header "Nombre: valor"]...
+                     [-origin ip[:puerto]] [-insecure-tls] [-json] [-quiet]
   eanbot serve       [-db eanbot.db] [-addr :8345]
   eanbot crawls      [-db eanbot.db] [-json]
   eanbot pages <crawl-id> [-db eanbot.db] [-status 2xx|3xx|4xx|5xx|error|blocked] [-q texto] [-json]

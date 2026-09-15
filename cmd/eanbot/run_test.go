@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -269,6 +270,61 @@ func TestCrawlNoHeaderFlagStoredAsEmptyObject(t *testing.T) {
 	}
 	if len(headers) != 0 {
 		t.Errorf("headers = %v, want empty object", headers)
+	}
+}
+
+func TestCrawlOriginFlag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "sitio.test" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>ok</body></html>`)
+	}))
+	defer srv.Close()
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort error: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"crawl", "http://sitio.test/", "-db", tempDBPath(t),
+		"-origin", "127.0.0.1:" + port, "-ignore-robots", "-max-pages", "1", "-json", "-quiet",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr.String())
+	}
+
+	var out crawlJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout.String(), err)
+	}
+	if out.Summary.Status2xx != 1 {
+		t.Errorf("Summary.Status2xx = %d, want 1 (-origin did not reach sitio.test)", out.Summary.Status2xx)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(out.Crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["origin"] != "127.0.0.1:"+port {
+		t.Errorf("stored origin = %v, want %q", cfg["origin"], "127.0.0.1:"+port)
+	}
+}
+
+func TestCrawlInvalidOriginFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"crawl", "https://example.com/", "-db", tempDBPath(t), "-origin", "abc",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code = %d, want 2, stderr = %s", code, stderr.String())
+	}
+	want := `origin no válido: "abc"`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 	}
 }
 

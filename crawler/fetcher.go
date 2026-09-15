@@ -2,8 +2,12 @@ package crawler
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,6 +40,30 @@ type HTTPFetcher struct {
 	// override either of them — including User-Agent itself. Header names
 	// are canonicalized (http.CanonicalHeaderKey) when sent.
 	Headers map[string]string
+
+	// Origin forces the origin server address ("ip" or "ip:port", see
+	// crawler.SplitOrigin) for requests whose host matches OriginHost,
+	// bypassing DNS resolution — the equivalent of `curl --resolve`, used
+	// to skip a CDN/WAF such as Cloudflare. The Host header and TLS SNI are
+	// left untouched (still the request's own host), only the dialed
+	// address changes. "" (the default) disables the override entirely.
+	Origin string
+	// OriginHost is the host requests are matched against before applying
+	// Origin: a request to OriginHost or its "www." variant (compared with
+	// strings.EqualFold on both sides after stripping any "www." prefix)
+	// is redirected to Origin; any other host dials normally, even after a
+	// scope change (e.g. the seed redirecting to another domain).
+	OriginHost string
+	// InsecureTLS disables TLS certificate verification. Unlike Origin, it
+	// applies to every request regardless of host.
+	InsecureTLS bool
+
+	// transportOnce builds the custom http.Transport (DialContext override
+	// for Origin, TLSClientConfig.InsecureSkipVerify for InsecureTLS) the
+	// first time Fetch runs, so that Origin/OriginHost/InsecureTLS can
+	// still be set after NewHTTPFetcher returns. sync.Once makes this safe
+	// under the concurrent Fetch calls crawler.Run issues.
+	transportOnce sync.Once
 }
 
 // NewHTTPFetcher builds an HTTPFetcher. It never follows redirects (3xx
@@ -55,8 +83,58 @@ func NewHTTPFetcher(userAgent string, timeout time.Duration, maxBody int64) *HTT
 	}
 }
 
+// ensureTransport builds h.client's transport on first use, cloning
+// http.DefaultTransport and wiring in the Origin/InsecureTLS overrides. It
+// is called from Fetch, guarded by transportOnce, so Origin, OriginHost and
+// InsecureTLS may be set any time before the first Fetch call.
+func (h *HTTPFetcher) ensureTransport() {
+	h.transportOnce.Do(func() {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+
+		if t.TLSClientConfig == nil {
+			t.TLSClientConfig = &tls.Config{}
+		}
+		t.TLSClientConfig.InsecureSkipVerify = h.InsecureTLS
+
+		baseDial := t.DialContext
+		origin, originHost := h.Origin, h.OriginHost
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if origin != "" {
+				if reqHost, reqPort, err := net.SplitHostPort(addr); err == nil && hostMatchesOrigin(reqHost, originHost) {
+					if originHost2, originPort, err := SplitOrigin(origin); err == nil {
+						if originPort == "" {
+							originPort = reqPort
+						}
+						addr = net.JoinHostPort(originHost2, originPort)
+					}
+				}
+			}
+			return baseDial(ctx, network, addr)
+		}
+
+		h.client.Transport = t
+	})
+}
+
+// hostMatchesOrigin reports whether reqHost is the host requests should be
+// redirected to Origin for: reqHost equals originHost, ignoring case and any
+// "www." prefix on either side.
+func hostMatchesOrigin(reqHost, originHost string) bool {
+	if originHost == "" {
+		return false
+	}
+	return strings.EqualFold(trimWWW(reqHost), trimWWW(originHost))
+}
+
+func trimWWW(host string) string {
+	trimmed := strings.TrimPrefix(strings.ToLower(host), "www.")
+	return trimmed
+}
+
 // Fetch performs a GET request against url.
 func (h *HTTPFetcher) Fetch(ctx context.Context, url string) (*Response, error) {
+	h.ensureTransport()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

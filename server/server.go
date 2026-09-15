@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,13 @@ func New(st *store.Store, opts Options) *Server {
 		newFetcher = func(cfg crawler.Config) crawler.Fetcher {
 			hf := crawler.NewHTTPFetcher(cfg.UserAgent, cfg.Timeout, cfg.MaxBodyBytes)
 			hf.Headers = cfg.Headers
+			hf.Origin = cfg.Origin
+			hf.InsecureTLS = cfg.InsecureTLS
+			if normalized, err := crawler.Normalize(cfg.Seed, nil); err == nil {
+				if u, err := url.Parse(normalized); err == nil {
+					hf.OriginHost = u.Hostname()
+				}
+			}
 			return hf
 		}
 	}

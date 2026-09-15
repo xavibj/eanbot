@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -399,6 +400,145 @@ func TestPostCrawl_InvalidHeaderName(t *testing.T) {
 	want := `cabecera no válida: "bad header"`
 	if len(body.Errors) != 1 || body.Errors[0] != want {
 		t.Errorf("errors = %v, want [%q]", body.Errors, want)
+	}
+}
+
+func TestPostCrawl_OriginAndInsecureTLSPassedToFetcherAndStored(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://origin.example/", statusResponse(200))
+
+	st := newTestStore(t)
+	var gotCfg crawler.Config
+	factory := func(cfg crawler.Config) crawler.Fetcher {
+		gotCfg = cfg
+		return f
+	}
+	srv := New(st, Options{NewFetcher: factory})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	})
+	h := srv.Handler()
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":         "https://origin.example/",
+		"origin":       "172.16.0.10",
+		"insecure_tls": true,
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	if gotCfg.Origin != "172.16.0.10" {
+		t.Errorf("NewFetcher received Config.Origin = %q, want %q", gotCfg.Origin, "172.16.0.10")
+	}
+	if !gotCfg.InsecureTLS {
+		t.Error("NewFetcher received Config.InsecureTLS = false, want true")
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["origin"] != "172.16.0.10" {
+		t.Errorf("stored origin = %v, want %q", cfg["origin"], "172.16.0.10")
+	}
+	if cfg["insecure_tls"] != true {
+		t.Errorf("stored insecure_tls = %v, want true", cfg["insecure_tls"])
+	}
+}
+
+func TestPostCrawl_OriginAndInsecureTLSAbsentStoredAsZeroValues(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://noorigin.example/", statusResponse(200))
+	_, h := newTestServer(t, f)
+
+	reqBody := mustJSON(t, map[string]any{"seed": "https://noorigin.example/"})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	crawl := decodeJSON[store.Crawl](t, w)
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["origin"] != "" {
+		t.Errorf("stored origin = %v, want \"\"", cfg["origin"])
+	}
+	if cfg["insecure_tls"] != false {
+		t.Errorf("stored insecure_tls = %v, want false", cfg["insecure_tls"])
+	}
+}
+
+func TestPostCrawl_InvalidOrigin(t *testing.T) {
+	_, h := newTestServer(t, newFakeFetcher())
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":   "https://example.com/",
+		"origin": "abc",
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	body := decodeJSON[errorsBody](t, w)
+	want := `origin no válido: "abc"`
+	if len(body.Errors) != 1 || body.Errors[0] != want {
+		t.Errorf("errors = %v, want [%q]", body.Errors, want)
+	}
+}
+
+// TestDefaultNewFetcherAppliesOrigin exercises the real (non-injected)
+// NewFetcher built by New when Options.NewFetcher is nil: it must build an
+// HTTPFetcher whose Origin/InsecureTLS come from the crawl's Config and
+// whose OriginHost is the seed's normalized host. The seed uses a hostname
+// that cannot resolve on its own ("sitio.test"); the crawl only succeeds if
+// the default factory wires Origin/OriginHost correctly so the request is
+// redirected to the httptest.Server's real address.
+func TestDefaultNewFetcherAppliesOrigin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><body>ok</body></html>")
+	}))
+	defer srv.Close()
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort error: %v", err)
+	}
+
+	st := newTestStore(t)
+	s := New(st, Options{})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	})
+	h := s.Handler()
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":          "http://sitio.test:" + port + "/",
+		"origin":        "127.0.0.1:" + port,
+		"ignore_robots": true,
+		"max_pages":     1,
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+
+	detail := waitUntilDone(t, h, crawl.ID, 5*time.Second)
+	if detail.Summary.Status2xx != 1 {
+		t.Errorf("Summary.Status2xx = %d, want 1 (default fetcher did not honor Origin)", detail.Summary.Status2xx)
 	}
 }
 

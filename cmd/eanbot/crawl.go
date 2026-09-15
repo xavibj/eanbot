@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,8 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	noSitemaps := fs.Bool("no-sitemaps", false, "no usar sitemaps.xml para descubrir URLs")
 	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
 	quiet := fs.Bool("quiet", false, "no mostrar el progreso en stderr")
+	origin := fs.String("origin", "", "IP (o ip:puerto) del servidor de origen, saltando Cloudflare (Host y SNI intactos)")
+	insecureTLS := fs.Bool("insecure-tls", false, "no verificar el certificado TLS")
 
 	headers := map[string]string{}
 	fs.Func("header", `cabecera adicional "Nombre: valor" para todas las peticiones (repetible)`, func(v string) error {
@@ -71,6 +74,8 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		IgnoreRobots:      *ignoreRobots,
 		UseSitemaps:       !*noSitemaps,
 		Headers:           headers,
+		Origin:            *origin,
+		InsecureTLS:       *insecureTLS,
 	}
 
 	if errs := cfg.Validate(); len(errs) > 0 {
@@ -101,6 +106,13 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 	fetcher := crawler.NewHTTPFetcher(cfg.UserAgent, cfg.Timeout, cfg.MaxBodyBytes)
 	fetcher.Headers = cfg.Headers
+	fetcher.Origin = cfg.Origin
+	fetcher.InsecureTLS = cfg.InsecureTLS
+	if normalized, nerr := crawler.Normalize(cfg.Seed, nil); nerr == nil {
+		if u, uerr := url.Parse(normalized); uerr == nil {
+			fetcher.OriginHost = u.Hostname()
+		}
+	}
 	sink := &progressSink{st: st, crawlID: crawl.ID, stderr: stderr, quiet: *quiet}
 
 	stats, runErr := crawler.Run(ctx, cfg, fetcher, sink)
@@ -241,6 +253,8 @@ type crawlConfigDoc struct {
 	IgnoreRobots      bool              `json:"ignore_robots"`
 	UseSitemaps       bool              `json:"use_sitemaps"`
 	Headers           map[string]string `json:"headers"`
+	Origin            string            `json:"origin"`
+	InsecureTLS       bool              `json:"insecure_tls"`
 }
 
 // crawlConfigJSON serializes cfg (already fully resolved from flags, no
@@ -263,6 +277,8 @@ func crawlConfigJSON(cfg crawler.Config) (json.RawMessage, error) {
 		IgnoreRobots:      cfg.IgnoreRobots,
 		UseSitemaps:       cfg.UseSitemaps,
 		Headers:           headers,
+		Origin:            cfg.Origin,
+		InsecureTLS:       cfg.InsecureTLS,
 	}
 	return json.Marshal(doc)
 }
