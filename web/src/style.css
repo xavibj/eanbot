@@ -429,26 +429,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   overflow-wrap: anywhere;
 }
 
-/* ---------- broken links ---------- */
-
-.broken-item + .broken-item { margin-top: 12px; }
-.broken-item__head {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-.broken-item__url { font-weight: 600; overflow-wrap: anywhere; }
-.referrers { list-style: none; margin: 10px 0 0; padding: 0; }
-.referrers li {
-  padding: 6px 0 6px 12px;
-  border-left: 2px solid var(--border);
-  font-size: 0.88rem;
-  overflow-wrap: anywhere;
-}
-.referrers li + li { margin-top: 2px; }
-.referrers .anchor { color: var(--muted); }
-
 /* ---------- responsive ---------- */
 
 @media (max-width: 640px) {

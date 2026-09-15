@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,13 +303,13 @@ func TestDeleteCrawl_Cascade(t *testing.T) {
 	}
 
 	var pageCount, linkCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pages WHERE crawl_id = ?`, c.ID).Scan(&pageCount); err != nil {
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM pages WHERE crawl_id = ?`, c.ID).Scan(&pageCount); err != nil {
 		t.Fatalf("count pages error = %v", err)
 	}
 	if pageCount != 0 {
 		t.Errorf("pageCount = %d, want 0", pageCount)
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM links WHERE crawl_id = ?`, c.ID).Scan(&linkCount); err != nil {
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM links WHERE crawl_id = ?`, c.ID).Scan(&linkCount); err != nil {
 		t.Fatalf("count links error = %v", err)
 	}
 	if linkCount != 0 {
@@ -391,33 +392,82 @@ func TestGetPage_OutAndInLinks(t *testing.T) {
 		t.Fatalf("AddPage(a) error = %v", err)
 	}
 
-	gotPage, out, in, err := s.GetPage(c.ID, homeID)
+	detail, err := s.GetPage(c.ID, homeID)
 	if err != nil {
 		t.Fatalf("GetPage(home) error = %v", err)
 	}
-	if gotPage.URL != home.URL {
-		t.Errorf("URL = %q", gotPage.URL)
+	if detail.Page.URL != home.URL {
+		t.Errorf("URL = %q", detail.Page.URL)
 	}
-	if len(out) != 2 {
-		t.Fatalf("len(out) = %d, want 2", len(out))
+	if len(detail.Outlinks) != 2 {
+		t.Fatalf("len(Outlinks) = %d, want 2", len(detail.Outlinks))
 	}
-	if len(in) != 1 {
-		t.Fatalf("len(in) = %d, want 1", len(in))
+	if detail.OutlinksTotal != 2 {
+		t.Errorf("OutlinksTotal = %d, want 2", detail.OutlinksTotal)
 	}
-	if in[0].FromURL != pageA.URL {
-		t.Errorf("in[0].FromURL = %q, want %q", in[0].FromURL, pageA.URL)
+	if len(detail.Inlinks) != 1 {
+		t.Fatalf("len(Inlinks) = %d, want 1", len(detail.Inlinks))
 	}
-	if in[0].FromPageID != pageAID {
-		t.Errorf("in[0].FromPageID = %d, want %d", in[0].FromPageID, pageAID)
+	if detail.InlinksTotal != 1 {
+		t.Errorf("InlinksTotal = %d, want 1", detail.InlinksTotal)
+	}
+	if detail.Inlinks[0].FromURL != pageA.URL {
+		t.Errorf("Inlinks[0].FromURL = %q, want %q", detail.Inlinks[0].FromURL, pageA.URL)
+	}
+	if detail.Inlinks[0].FromPageID != pageAID {
+		t.Errorf("Inlinks[0].FromPageID = %d, want %d", detail.Inlinks[0].FromPageID, pageAID)
 	}
 }
 
 func TestGetPage_NotFound(t *testing.T) {
 	s := openTestStore(t)
 	c := mustCreateCrawl(t, s, "https://example.com")
-	_, _, _, err := s.GetPage(c.ID, 999)
+	_, err := s.GetPage(c.ID, 999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestGetPage_LinkLimit checks that outlinks and inlinks are capped at
+// LinkLimit even when more exist, while the *_total fields report the true
+// count.
+func TestGetPage_LinkLimit(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	outLinks := make([]Link, 0, LinkLimit+1)
+	for i := 0; i < LinkLimit+1; i++ {
+		outLinks = append(outLinks, Link{ToURL: fmt.Sprintf("https://example.com/out%d", i)})
+	}
+	homeID, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}, outLinks)
+	if err != nil {
+		t.Fatalf("AddPage(home) error = %v", err)
+	}
+	for i := 0; i < LinkLimit+1; i++ {
+		url := fmt.Sprintf("https://example.com/in%d", i)
+		if _, err := s.AddPage(Page{CrawlID: c.ID, URL: url, Status: 200, FetchedAt: now}, []Link{
+			{ToURL: "https://example.com/"},
+		}); err != nil {
+			t.Fatalf("AddPage(%s) error = %v", url, err)
+		}
+	}
+
+	detail, err := s.GetPage(c.ID, homeID)
+	if err != nil {
+		t.Fatalf("GetPage() error = %v", err)
+	}
+	if len(detail.Outlinks) != LinkLimit {
+		t.Errorf("len(Outlinks) = %d, want %d", len(detail.Outlinks), LinkLimit)
+	}
+	if detail.OutlinksTotal != LinkLimit+1 {
+		t.Errorf("OutlinksTotal = %d, want %d", detail.OutlinksTotal, LinkLimit+1)
+	}
+	if len(detail.Inlinks) != LinkLimit {
+		t.Errorf("len(Inlinks) = %d, want %d", len(detail.Inlinks), LinkLimit)
+	}
+	if detail.InlinksTotal != LinkLimit+1 {
+		t.Errorf("InlinksTotal = %d, want %d", detail.InlinksTotal, LinkLimit+1)
 	}
 }
 
@@ -704,71 +754,208 @@ func TestSummarize_NotFound(t *testing.T) {
 
 // --- BrokenLinks ---
 
-func TestBrokenLinks(t *testing.T) {
-	s := openTestStore(t)
+// seedBrokenLinksCrawl builds a crawl with two broken pages: the seed page
+// itself (500, no referrers since nothing links to a crawl's seed) and
+// /missing (404, linked three times from the seed). A blocked page must not
+// count as broken.
+func seedBrokenLinksCrawl(t *testing.T, s *Store) int64 {
+	t.Helper()
 	c := mustCreateCrawl(t, s, "https://example.com")
 	now := time.Now().UTC()
 
-	homeID, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}, []Link{
-		{ToURL: "https://example.com/missing", Text: "broken link"},
-		{ToURL: "https://example.com/other-missing", Text: "another"},
-	})
-	if err != nil {
-		t.Fatalf("AddPage(home) error = %v", err)
-	}
-	aID, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, FetchedAt: now}, []Link{
-		{ToURL: "https://example.com/missing", Text: "also broken"},
-	})
-	if err != nil {
-		t.Fatalf("AddPage(a) error = %v", err)
+	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/", Status: 500, FetchedAt: now}, []Link{
+		{ToURL: "https://example.com/missing", Text: "1"},
+		{ToURL: "https://example.com/missing", Text: "2"},
+		{ToURL: "https://example.com/missing", Text: "3"},
+	}); err != nil {
+		t.Fatalf("AddPage(seed) error = %v", err)
 	}
 	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/missing", Status: 404, FetchedAt: now}, nil); err != nil {
 		t.Fatalf("AddPage(missing) error = %v", err)
-	}
-	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/other-missing", Status: 0, Blocked: false, Error: "timeout", FetchedAt: now}, nil); err != nil {
-		t.Fatalf("AddPage(other-missing) error = %v", err)
 	}
 	// A blocked page (status 0, blocked=true) must NOT count as broken.
 	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/blocked", Status: 0, Blocked: true, FetchedAt: now}, nil); err != nil {
 		t.Fatalf("AddPage(blocked) error = %v", err)
 	}
+	return c.ID
+}
 
-	broken, err := s.BrokenLinks(c.ID)
+func TestBrokenLinks_ReferrersCountAndOrder(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedBrokenLinksCrawl(t, s)
+
+	broken, total, err := s.BrokenLinks(crawlID, 0, 0)
 	if err != nil {
 		t.Fatalf("BrokenLinks() error = %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
 	}
 	if len(broken) != 2 {
 		t.Fatalf("len(broken) = %d, want 2", len(broken))
 	}
-	// Ordered by url: /missing before /other-missing
-	if broken[0].Page.URL != "https://example.com/missing" {
+	// Ordered by url: / before /missing.
+	if broken[0].Page.URL != "https://example.com/" {
 		t.Errorf("broken[0].Page.URL = %q", broken[0].Page.URL)
 	}
-	if broken[1].Page.URL != "https://example.com/other-missing" {
+	if broken[0].ReferrersCount != 0 {
+		t.Errorf("broken[0].ReferrersCount = %d, want 0", broken[0].ReferrersCount)
+	}
+	if broken[1].Page.URL != "https://example.com/missing" {
 		t.Errorf("broken[1].Page.URL = %q", broken[1].Page.URL)
 	}
-	if len(broken[0].Referrers) != 2 {
-		t.Fatalf("len(broken[0].Referrers) = %d, want 2", len(broken[0].Referrers))
+	if broken[1].ReferrersCount != 3 {
+		t.Errorf("broken[1].ReferrersCount = %d, want 3", broken[1].ReferrersCount)
 	}
-	// Referrers ordered by from_url: /  before /a
-	if broken[0].Referrers[0].FromURL != "https://example.com/" {
-		t.Errorf("Referrers[0].FromURL = %q", broken[0].Referrers[0].FromURL)
+}
+
+func TestBrokenLinks_Pagination(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedBrokenLinksCrawl(t, s)
+
+	page1, total, err := s.BrokenLinks(crawlID, 1, 0)
+	if err != nil {
+		t.Fatalf("BrokenLinks(limit=1, offset=0) error = %v", err)
 	}
-	if broken[0].Referrers[1].FromURL != "https://example.com/a" {
-		t.Errorf("Referrers[1].FromURL = %q", broken[0].Referrers[1].FromURL)
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
 	}
-	if len(broken[1].Referrers) != 1 {
-		t.Fatalf("len(broken[1].Referrers) = %d, want 1", len(broken[1].Referrers))
+	if len(page1) != 1 || page1[0].Page.URL != "https://example.com/" {
+		t.Fatalf("page1 = %+v, want just /", page1)
 	}
-	_ = homeID
-	_ = aID
+
+	page2, total, err := s.BrokenLinks(crawlID, 1, 1)
+	if err != nil {
+		t.Fatalf("BrokenLinks(limit=1, offset=1) error = %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
+	}
+	if len(page2) != 1 || page2[0].Page.URL != "https://example.com/missing" {
+		t.Fatalf("page2 = %+v, want just /missing", page2)
+	}
+}
+
+func TestBrokenLinks_DefaultAndMaxLimit(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedBrokenLinksCrawl(t, s)
+
+	if _, _, err := s.BrokenLinks(crawlID, 0, 0); err != nil {
+		t.Fatalf("BrokenLinks(limit=0) error = %v", err)
+	}
+	if _, _, err := s.BrokenLinks(crawlID, 5000, 0); err != nil {
+		t.Fatalf("BrokenLinks(limit=5000) error = %v", err)
+	}
 }
 
 func TestBrokenLinks_NotFound(t *testing.T) {
 	s := openTestStore(t)
-	_, err := s.BrokenLinks(999)
+	_, _, err := s.BrokenLinks(999, 0, 0)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- Referrers ---
+
+func TestReferrers_PerURLLimit(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	for i := 0; i < 5; i++ {
+		url := fmt.Sprintf("https://example.com/from%d", i)
+		if _, err := s.AddPage(Page{CrawlID: c.ID, URL: url, Status: 200, FetchedAt: now}, []Link{
+			{ToURL: "https://example.com/missing", Text: fmt.Sprintf("link%d", i)},
+		}); err != nil {
+			t.Fatalf("AddPage(%s) error = %v", url, err)
+		}
+	}
+	if _, err := s.AddPage(Page{CrawlID: c.ID, URL: "https://example.com/missing", Status: 404, FetchedAt: now}, nil); err != nil {
+		t.Fatalf("AddPage(missing) error = %v", err)
+	}
+
+	got, err := s.Referrers(c.ID, []string{"https://example.com/missing"}, 3)
+	if err != nil {
+		t.Fatalf("Referrers() error = %v", err)
+	}
+	refs := got["https://example.com/missing"]
+	if len(refs) != 3 {
+		t.Fatalf("len(refs) = %d, want 3", len(refs))
+	}
+	for i, want := range []string{"from0", "from1", "from2"} {
+		if !strings.HasSuffix(refs[i].FromURL, want) {
+			t.Errorf("refs[%d].FromURL = %q, want suffix %q", i, refs[i].FromURL, want)
+		}
+	}
+}
+
+func TestReferrers_DefaultPerURL(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddPage(Page{CrawlID: c.ID, URL: fmt.Sprintf("https://example.com/from%d", i), Status: 200, FetchedAt: now}, []Link{
+			{ToURL: "https://example.com/missing"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.Referrers(c.ID, []string{"https://example.com/missing"}, 0)
+	if err != nil {
+		t.Fatalf("Referrers() error = %v", err)
+	}
+	if len(got["https://example.com/missing"]) != 3 {
+		t.Errorf("len = %d, want 3 (perURL<=0 defaults to 3)", len(got["https://example.com/missing"]))
+	}
+}
+
+func TestReferrers_EmptyToURLs(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	got, err := s.Referrers(c.ID, nil, 3)
+	if err != nil {
+		t.Fatalf("Referrers() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
+
+// --- concurrent reads while a write transaction is open ---
+
+func TestConcurrentRead_NotBlockedByOpenWriteTransaction(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+
+	// Open (but do not commit) a write transaction directly on the write
+	// pool, simulating a long crawl insert. BEGIN IMMEDIATE takes the
+	// reserved lock right away, without needing an actual write statement.
+	if _, err := s.w.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE error = %v", err)
+	}
+	defer func() {
+		if _, err := s.w.Exec("COMMIT"); err != nil {
+			t.Errorf("COMMIT error = %v", err)
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.GetCrawl(c.ID)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("GetCrawl() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GetCrawl() did not return within 1s while a write transaction was open on the write pool")
 	}
 }
 

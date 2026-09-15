@@ -93,8 +93,8 @@ export function getPage(id, pageId) {
   return get(`/api/crawls/${encodeURIComponent(id)}/pages/${encodeURIComponent(pageId)}`)
 }
 
-export function listBroken(id) {
-  return get(`/api/crawls/${encodeURIComponent(id)}/broken`)
+export function listBroken(id, { limit, offset } = {}) {
+  return get(`/api/crawls/${encodeURIComponent(id)}/broken${query({ limit, offset })}`)
 }
 
 // errorsOf turns anything thrown by the calls above into a list of strings.

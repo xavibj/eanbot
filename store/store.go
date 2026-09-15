@@ -18,9 +18,11 @@ import (
 // ErrNotFound is returned by getters when the requested row does not exist.
 var ErrNotFound = errors.New("not found")
 
-// Store wraps a SQLite database handle.
+// Store wraps two SQLite database handles over the same file: one for
+// writes (and schema init), one for reads. See Open for why.
 type Store struct {
-	db *sql.DB
+	w *sql.DB // writes: CreateCrawl, SetRobots, FinishCrawl, AddPage, DeleteCrawl, init. SetMaxOpenConns(1).
+	r *sql.DB // reads: everything else. SetMaxOpenConns(4).
 }
 
 // schemaStatements creates the schema if it does not exist yet. Each
@@ -77,25 +79,39 @@ var schemaStatements = []string{
 // Open opens (creating if needed) the SQLite database at path, applies the
 // schema and marks any crawl left in "running" state as failed (the process
 // that owned it died before finishing).
+// Open uses two separate connection pools over the same DSN: a write pool
+// limited to a single connection (SQLite allows only one writer at a time
+// anyway, and this serializes CreateCrawl/SetRobots/FinishCrawl/AddPage/
+// DeleteCrawl/init so they never race each other) and a read pool of up to
+// four connections. WAL mode lets readers proceed against the last
+// committed snapshot while a write transaction is open, so a long crawl
+// insert never makes the UI wait, and a long report query never makes the
+// crawl wait. modernc.org/sqlite applies _pragma DSN values per new
+// connection, so both pools see the same pragmas.
 func Open(path string) (*Store, error) {
 	if err := checkDirWritable(path); err != nil {
 		return nil, err
 	}
 	ensureSQLiteTempDir(filepath.Dir(path), sqliteTempCandidates())
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
-	db, err := sql.Open("sqlite", dsn)
+
+	w, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	// modernc.org/sqlite applies _pragma DSN values per new connection, so a
-	// pool of more than one connection could hand out a connection where
-	// foreign_keys was not (yet) enabled. A single connection keeps behavior
-	// predictable and is enough for eanbot's workload.
-	db.SetMaxOpenConns(1)
+	w.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	r, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		w.Close()
+		return nil, fmt.Errorf("store: open %s: %w", path, err)
+	}
+	r.SetMaxOpenConns(4)
+
+	s := &Store{w: w, r: r}
 	if err := s.init(); err != nil {
-		db.Close()
+		w.Close()
+		r.Close()
 		return nil, err
 	}
 	return s, nil
@@ -175,12 +191,12 @@ func dirWritable(dir string) bool {
 
 func (s *Store) init() error {
 	for _, stmt := range schemaStatements {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.w.Exec(stmt); err != nil {
 			return fmt.Errorf("store: init schema: %w", err)
 		}
 	}
 	now := nowString()
-	if _, err := s.db.Exec(
+	if _, err := s.w.Exec(
 		`UPDATE crawls SET status = 'failed', error = 'interrumpido', finished_at = ? WHERE status = 'running'`,
 		now,
 	); err != nil {
@@ -189,9 +205,27 @@ func (s *Store) init() error {
 	return nil
 }
 
-// Close closes the underlying database handle.
+// Close closes both underlying database handles.
 func (s *Store) Close() error {
-	return s.db.Close()
+	errW := s.w.Close()
+	errR := s.r.Close()
+	if errW != nil {
+		return errW
+	}
+	return errR
+}
+
+// clampLimit normalizes a caller-supplied limit for paginated queries: 0 or
+// negative means the default of 100, and anything above 1000 is capped, per
+// specs/003-store.md.
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 1000 {
+		return 1000
+	}
+	return limit
 }
 
 // nowString formats the current UTC time as used for all timestamp columns.

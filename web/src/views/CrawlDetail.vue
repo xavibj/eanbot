@@ -5,6 +5,7 @@ import { crawlDuration, formatDateTime, formatMillis, formatNumber, orDash } fro
 import { navigate, pageHref } from '../router.js'
 import CrawlBadge from '../components/CrawlBadge.vue'
 import ErrorList from '../components/ErrorList.vue'
+import Pagination from '../components/Pagination.vue'
 import StatusCode from '../components/StatusCode.vue'
 import SummaryCards from '../components/SummaryCards.vue'
 
@@ -43,6 +44,9 @@ const pagesLoading = ref(false)
 const pagesErrors = ref([])
 
 const broken = ref([])
+const brokenTotal = ref(0)
+const brokenOffset = ref(0)
+const brokenLimit = ref(PAGE_SIZE)
 const brokenLoaded = ref(false)
 const brokenLoading = ref(false)
 const brokenErrors = ref([])
@@ -74,16 +78,6 @@ const headerNames = computed(() => {
 })
 
 const originLabel = computed(() => String(config.value?.origin ?? '').trim())
-
-const rangeLabel = computed(() => {
-  if (total.value === 0) return '0 páginas'
-  const from = offset.value + 1
-  const to = Math.min(offset.value + pages.value.length, total.value)
-  return `${formatNumber(from)}–${formatNumber(to)} de ${formatNumber(total.value)}`
-})
-
-const canPrev = computed(() => offset.value > 0 && !pagesLoading.value)
-const canNext = computed(() => offset.value + limit.value < total.value && !pagesLoading.value)
 
 function clearTimers() {
   if (timer !== null) {
@@ -179,23 +173,46 @@ async function loadPages(silent = false) {
 async function loadBroken(silent = false) {
   const seq = ++brokenSeq
   if (!silent) {
+    // Like the pages tab: drop the stale rows before asking again.
     brokenLoading.value = true
     brokenErrors.value = []
     broken.value = []
+    brokenTotal.value = 0
   }
   try {
-    const data = await listBroken(props.crawlId)
+    const data = await listBroken(props.crawlId, {
+      limit: brokenLimit.value,
+      offset: brokenOffset.value,
+    })
     if (stopped || seq !== brokenSeq) return
     broken.value = Array.isArray(data.broken) ? data.broken : []
+    brokenTotal.value = Number(data.total) || 0
+    const gotLimit = Number(data.limit)
+    if (Number.isFinite(gotLimit) && gotLimit > 0) brokenLimit.value = gotLimit
+    const gotOffset = Number(data.offset)
+    if (Number.isFinite(gotOffset) && gotOffset >= 0) brokenOffset.value = gotOffset
     brokenErrors.value = []
     brokenLoaded.value = true
   } catch (err) {
     if (stopped || seq !== brokenSeq) return
     brokenErrors.value = errorsOf(err)
-    if (!silent) broken.value = []
+    if (!silent) {
+      broken.value = []
+      brokenTotal.value = 0
+    }
   } finally {
     if (!stopped && seq === brokenSeq) brokenLoading.value = false
   }
+}
+
+function prevBroken() {
+  brokenOffset.value = Math.max(0, brokenOffset.value - brokenLimit.value)
+  loadBroken()
+}
+
+function nextBroken() {
+  brokenOffset.value = brokenOffset.value + brokenLimit.value
+  loadBroken()
 }
 
 function onStatusChange(event) {
@@ -216,13 +233,11 @@ function onSearchInput(event) {
 }
 
 function prevPage() {
-  if (!canPrev.value) return
   offset.value = Math.max(0, offset.value - limit.value)
   loadPages()
 }
 
 function nextPage() {
-  if (!canNext.value) return
   offset.value = offset.value + limit.value
   loadPages()
 }
@@ -412,17 +427,16 @@ onBeforeUnmount(() => {
           </table>
         </div>
 
-        <div class="pagination" v-if="!pagesLoading && total > 0">
-          <span>{{ rangeLabel }}</span>
-          <span class="btn-row">
-            <button type="button" class="btn btn-sm" :disabled="!canPrev" @click="prevPage">
-              Anterior
-            </button>
-            <button type="button" class="btn btn-sm" :disabled="!canNext" @click="nextPage">
-              Siguiente
-            </button>
-          </span>
-        </div>
+        <Pagination
+          v-if="!pagesLoading && total > 0"
+          :offset="offset"
+          :limit="limit"
+          :count="pages.length"
+          :total="total"
+          :disabled="pagesLoading"
+          @prev="prevPage"
+          @next="nextPage"
+        />
       </div>
 
       <div v-show="tab === 'broken'">
@@ -434,30 +448,45 @@ onBeforeUnmount(() => {
           No hay enlaces rotos en este rastreo.
         </div>
 
-        <div v-else>
-          <div v-for="item in broken" :key="item.page.id" class="card broken-item">
-            <div class="broken-item__head">
-              <StatusCode :status="item.page.status" :blocked="item.page.blocked" />
-              <a class="broken-item__url" :href="pageHref(crawlId, item.page.id)">
-                {{ item.page.url }}
-              </a>
-            </div>
-            <p v-if="item.page.error" class="small muted" style="margin: 6px 0 0">
-              {{ item.page.error }}
-            </p>
-            <p class="small muted" style="margin: 8px 0 0">
-              Enlazada desde {{ formatNumber((item.referrers || []).length) }} página(s):
-            </p>
-            <ul class="referrers">
-              <li v-for="(referrer, i) in item.referrers || []" :key="i">
-                <a :href="pageHref(crawlId, referrer.from_page_id)">{{ referrer.from_url }}</a>
-                <span v-if="referrer.text" class="anchor"> — «{{ referrer.text }}»</span>
-                <span v-if="referrer.nofollow" class="pill" style="margin-left: 6px">nofollow</span>
-              </li>
-            </ul>
-          </div>
+        <div v-else class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Código</th>
+                <th>URL</th>
+                <th class="num">Referrers</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="item in broken"
+                :key="item.page.id"
+                class="clickable"
+                @click="openPage(item.page)"
+              >
+                <td><StatusCode :status="item.page.status" :blocked="item.page.blocked" /></td>
+                <td>
+                  <span class="truncate mono" :title="item.page.url">{{ item.page.url }}</span>
+                  <div v-if="item.page.error" class="small muted">{{ item.page.error }}</div>
+                </td>
+                <td class="num">{{ formatNumber(item.referrers_count) }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
+
+        <Pagination
+          v-if="!brokenLoading && brokenTotal > 0"
+          :offset="brokenOffset"
+          :limit="brokenLimit"
+          :count="broken.length"
+          :total="brokenTotal"
+          :disabled="brokenLoading"
+          @prev="prevBroken"
+          @next="nextBroken"
+        />
       </div>
+
     </template>
 
     <div v-else-if="!headErrors.length" class="card empty">No se ha encontrado el rastreo.</div>

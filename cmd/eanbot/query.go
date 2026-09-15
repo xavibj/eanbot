@@ -109,10 +109,25 @@ func cmdPages(args []string, stdout, stderr io.Writer) int {
 	return flushTabwriter(tw, stderr)
 }
 
+// brokenBatchSize is how many broken pages cmdBroken fetches from the store
+// per call to BrokenLinks/Referrers, so a crawl with tens of thousands of
+// broken pages is streamed rather than loaded (and paginated) all at once.
+const brokenBatchSize = 1000
+
+// brokenPageJSON is one entry of "eanbot broken -json"'s "broken" array:
+// the broken page, its total referrer count, and up to -referrers of the
+// actual referring links.
+type brokenPageJSON struct {
+	Page           store.Page   `json:"page"`
+	ReferrersCount int          `json:"referrers_count"`
+	Referrers      []store.Link `json:"referrers"`
+}
+
 // cmdBroken implements "eanbot broken <crawl-id> [flags]".
 func cmdBroken(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("broken", stderr)
 	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
+	referrersN := fs.Int("referrers", 3, "nº de referrers a mostrar por página rota")
 	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
 
 	crawlID, args, code := shiftCrawlID(args, stderr)
@@ -138,29 +153,73 @@ func cmdBroken(args []string, stdout, stderr io.Writer) int {
 	}
 	defer st.Close()
 
-	broken, err := st.BrokenLinks(crawlID)
+	result, total, err := collectBrokenPages(st, crawlID, *referrersN)
 	if err != nil {
 		return reportCrawlLookupError(stderr, err)
 	}
 
 	if *jsonOutput {
 		return writeJSONLine(stdout, stderr, struct {
-			Broken []store.BrokenLink `json:"broken"`
-		}{broken})
+			Broken []brokenPageJSON `json:"broken"`
+			Total  int              `json:"total"`
+		}{result, total})
 	}
 
-	for _, b := range broken {
-		fmt.Fprintf(stdout, "%s  %s\n", b.Page.URL, storePageCode(b.Page))
+	for _, b := range result {
+		fmt.Fprintf(stdout, "%s  %d  %s\n", storePageCode(b.Page), b.ReferrersCount, b.Page.URL)
 		for _, r := range b.Referrers {
-			text := r.Text
-			if text != "" {
-				fmt.Fprintf(stdout, "    <- %s (%q)\n", r.FromURL, text)
+			if r.Text != "" {
+				fmt.Fprintf(stdout, "    <- %s (%q)\n", r.FromURL, r.Text)
 			} else {
 				fmt.Fprintf(stdout, "    <- %s\n", r.FromURL)
 			}
 		}
 	}
 	return 0
+}
+
+// collectBrokenPages walks store.BrokenLinks in batches of brokenBatchSize
+// and fills in up to referrersPerPage referrers per broken page (one
+// store.Referrers call per batch), so a crawl with a large number of broken
+// pages is never loaded into a single unbounded query.
+func collectBrokenPages(st *store.Store, crawlID int64, referrersPerPage int) ([]brokenPageJSON, int, error) {
+	var (
+		result []brokenPageJSON
+		total  int
+		offset int
+	)
+	for {
+		batch, t, err := st.BrokenLinks(crawlID, brokenBatchSize, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		total = t
+		if len(batch) == 0 {
+			break
+		}
+
+		urls := make([]string, len(batch))
+		for i, bp := range batch {
+			urls[i] = bp.Page.URL
+		}
+		refsByURL, err := st.Referrers(crawlID, urls, referrersPerPage)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, bp := range batch {
+			result = append(result, brokenPageJSON{
+				Page:           bp.Page,
+				ReferrersCount: bp.ReferrersCount,
+				Referrers:      refsByURL[bp.Page.URL],
+			})
+		}
+
+		offset += len(batch)
+		if offset >= total {
+			break
+		}
+	}
+	return result, total, nil
 }
 
 // shiftCrawlID extracts the leading positional <crawl-id> argument shared by

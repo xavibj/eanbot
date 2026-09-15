@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -580,8 +581,42 @@ func TestQueryCommandsAfterCrawl(t *testing.T) {
 		if !strings.Contains(stdout.String(), "/missing") {
 			t.Errorf("stdout = %q, want /missing", stdout.String())
 		}
-		if !strings.Contains(stdout.String(), srv.URL+"/") {
-			t.Errorf("stdout = %q, want referrer URL", stdout.String())
+		// "código  nº-referrers  URL" then, indented, "<- from_url (\"texto\")".
+		if !strings.Contains(stdout.String(), "404  1  ") {
+			t.Errorf("stdout = %q, want a '404  1  ' summary line", stdout.String())
+		}
+		if !strings.Contains(stdout.String(), fmt.Sprintf("    <- %s/ (\"missing\")", srv.URL)) {
+			t.Errorf("stdout = %q, want an indented referrer line", stdout.String())
+		}
+	})
+
+	t.Run("broken json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCtx(context.Background(), []string{"broken", "1", "-db", dbPath, "-json"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+		}
+		var out struct {
+			Broken []brokenPageJSON `json:"broken"`
+			Total  int              `json:"total"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+		if out.Total != 1 {
+			t.Fatalf("Total = %d, want 1", out.Total)
+		}
+		if len(out.Broken) != 1 {
+			t.Fatalf("len(Broken) = %d, want 1", len(out.Broken))
+		}
+		if !strings.HasSuffix(out.Broken[0].Page.URL, "/missing") {
+			t.Errorf("Broken[0].Page.URL = %q, want suffix /missing", out.Broken[0].Page.URL)
+		}
+		if out.Broken[0].ReferrersCount != 1 {
+			t.Errorf("Broken[0].ReferrersCount = %d, want 1", out.Broken[0].ReferrersCount)
+		}
+		if len(out.Broken[0].Referrers) != 1 || out.Broken[0].Referrers[0].FromURL != srv.URL+"/" {
+			t.Errorf("Broken[0].Referrers = %+v, want one referrer from %s/", out.Broken[0].Referrers, srv.URL)
 		}
 	})
 
@@ -592,6 +627,66 @@ func TestQueryCommandsAfterCrawl(t *testing.T) {
 			t.Fatalf("code = %d, want 1", code)
 		}
 	})
+}
+
+// TestCmdBroken_ReferrersFlag checks that -referrers caps the number of
+// referring links shown per broken page while referrers_count still
+// reports the true total, seeding the store directly (rather than via a
+// crawl) to control the exact number of referrers.
+func TestCmdBroken_ReferrersFlag(t *testing.T) {
+	dbPath := tempDBPath(t)
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	crawl, err := st.CreateCrawl("https://example.com", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CreateCrawl() error = %v", err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddPage(store.Page{
+			CrawlID: crawl.ID, URL: fmt.Sprintf("https://example.com/from%d", i), Status: 200, FetchedAt: now,
+		}, []store.Link{{ToURL: "https://example.com/missing", Text: fmt.Sprintf("link%d", i)}}); err != nil {
+			t.Fatalf("AddPage() error = %v", err)
+		}
+	}
+	if _, err := st.AddPage(store.Page{
+		CrawlID: crawl.ID, URL: "https://example.com/missing", Status: 404, FetchedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("AddPage(missing) error = %v", err)
+	}
+	if err := st.FinishCrawl(crawl.ID, "done", ""); err != nil {
+		t.Fatalf("FinishCrawl() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"broken", strconv.FormatInt(crawl.ID, 10), "-db", dbPath, "-referrers", "2", "-json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	var out struct {
+		Broken []brokenPageJSON `json:"broken"`
+		Total  int              `json:"total"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if out.Total != 1 || len(out.Broken) != 1 {
+		t.Fatalf("out = %+v, want a single broken page", out)
+	}
+	if out.Broken[0].ReferrersCount != 5 {
+		t.Errorf("ReferrersCount = %d, want 5", out.Broken[0].ReferrersCount)
+	}
+	if len(out.Broken[0].Referrers) != 2 {
+		t.Errorf("len(Referrers) = %d, want 2 (capped by -referrers)", len(out.Broken[0].Referrers))
+	}
 }
 
 // --- serve ---

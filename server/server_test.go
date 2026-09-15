@@ -802,9 +802,11 @@ func TestListPages_FiltersAndPagination(t *testing.T) {
 }
 
 type pageDetailBody struct {
-	Page     store.Page   `json:"page"`
-	Outlinks []store.Link `json:"outlinks"`
-	Inlinks  []store.Link `json:"inlinks"`
+	Page          store.Page   `json:"page"`
+	Outlinks      []store.Link `json:"outlinks"`
+	Inlinks       []store.Link `json:"inlinks"`
+	OutlinksTotal int          `json:"outlinks_total"`
+	InlinksTotal  int          `json:"inlinks_total"`
 }
 
 func TestGetPage_InOutLinks(t *testing.T) {
@@ -831,8 +833,14 @@ func TestGetPage_InOutLinks(t *testing.T) {
 	if len(detail.Outlinks) != 0 {
 		t.Errorf("outlinks = %+v, want none", detail.Outlinks)
 	}
+	if detail.OutlinksTotal != 0 {
+		t.Errorf("outlinks_total = %d, want 0", detail.OutlinksTotal)
+	}
 	if len(detail.Inlinks) != 1 {
 		t.Fatalf("inlinks = %+v, want 1", detail.Inlinks)
+	}
+	if detail.InlinksTotal != 1 {
+		t.Errorf("inlinks_total = %d, want 1", detail.InlinksTotal)
 	}
 	if detail.Inlinks[0].Text != "A" {
 		t.Errorf("inlinks[0].Text = %q, want A", detail.Inlinks[0].Text)
@@ -849,7 +857,10 @@ func TestGetPage_InOutLinks(t *testing.T) {
 }
 
 type brokenBody struct {
-	Broken []store.BrokenLink `json:"broken"`
+	Broken []store.BrokenPage `json:"broken"`
+	Total  int                `json:"total"`
+	Limit  int                `json:"limit"`
+	Offset int                `json:"offset"`
 }
 
 func TestBrokenLinks(t *testing.T) {
@@ -860,14 +871,36 @@ func TestBrokenLinks(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 	body := decodeJSON[brokenBody](t, w)
+	if body.Total != 1 || body.Limit != 100 || body.Offset != 0 {
+		t.Errorf("total/limit/offset = %d/%d/%d, want 1/100/0", body.Total, body.Limit, body.Offset)
+	}
 	if len(body.Broken) != 1 {
 		t.Fatalf("broken = %+v, want 1 entry", body.Broken)
 	}
 	if !strings.HasSuffix(body.Broken[0].Page.URL, "/b") {
 		t.Errorf("broken page = %q, want suffix /b", body.Broken[0].Page.URL)
 	}
-	if len(body.Broken[0].Referrers) != 1 || body.Broken[0].Referrers[0].Text != "B" {
-		t.Errorf("referrers = %+v", body.Broken[0].Referrers)
+	if body.Broken[0].ReferrersCount != 1 {
+		t.Errorf("referrers_count = %d, want 1", body.Broken[0].ReferrersCount)
+	}
+}
+
+func TestBrokenLinks_Pagination(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/broken?limit=1&offset=0", id), nil)
+	body := decodeJSON[brokenBody](t, w)
+	if body.Limit != 1 || body.Offset != 0 || body.Total != 1 {
+		t.Errorf("limit/offset/total = %d/%d/%d, want 1/0/1", body.Limit, body.Offset, body.Total)
+	}
+	if len(body.Broken) != 1 {
+		t.Errorf("broken = %+v, want 1 entry", body.Broken)
+	}
+
+	w2 := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/broken?offset=1", id), nil)
+	body2 := decodeJSON[brokenBody](t, w2)
+	if len(body2.Broken) != 0 {
+		t.Errorf("broken past total = %+v, want none", body2.Broken)
 	}
 }
 

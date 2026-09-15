@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { errorsOf, getPage } from '../api.js'
 import { formatBool, formatBytes, formatDateTime, formatNumber, orDash } from '../format.js'
 import { crawlHref, pageHref } from '../router.js'
@@ -14,10 +14,20 @@ const props = defineProps({
 const page = ref(null)
 const outlinks = ref([])
 const inlinks = ref([])
+const outlinksTotal = ref(0)
+const inlinksTotal = ref(0)
 const loading = ref(true)
 const errors = ref([])
 
 let stopped = false
+
+function totalOr(value, fallback) {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= fallback ? n : fallback
+}
+
+const outlinksTruncated = computed(() => outlinksTotal.value > outlinks.value.length)
+const inlinksTruncated = computed(() => inlinksTotal.value > inlinks.value.length)
 
 async function load() {
   loading.value = true
@@ -25,12 +35,17 @@ async function load() {
   page.value = null
   outlinks.value = []
   inlinks.value = []
+  outlinksTotal.value = 0
+  inlinksTotal.value = 0
   try {
     const data = await getPage(props.crawlId, props.pageId)
     if (stopped) return
     page.value = data.page || null
     outlinks.value = Array.isArray(data.outlinks) ? data.outlinks : []
     inlinks.value = Array.isArray(data.inlinks) ? data.inlinks : []
+    // The API caps each list at 500; the totals say how many there really are.
+    outlinksTotal.value = totalOr(data.outlinks_total, outlinks.value.length)
+    inlinksTotal.value = totalOr(data.inlinks_total, inlinks.value.length)
   } catch (err) {
     if (stopped) return
     errors.value = errorsOf(err)
@@ -124,7 +139,12 @@ onMounted(load)
       </div>
 
       <div class="card">
-        <h2>Enlaces salientes ({{ formatNumber(outlinks.length) }})</h2>
+        <h2>
+          Enlaces salientes ({{ formatNumber(outlinks.length) }} de {{ formatNumber(outlinksTotal) }})
+        </h2>
+        <p v-if="outlinksTruncated" class="small muted" style="margin: 4px 0 0">
+          Mostrando los primeros {{ formatNumber(outlinks.length) }}.
+        </p>
         <div v-if="outlinks.length === 0" class="empty">Esta página no enlaza a ninguna otra.</div>
         <div v-else class="table-wrap" style="margin-top: 10px">
           <table>
@@ -149,7 +169,13 @@ onMounted(load)
       </div>
 
       <div class="card">
-        <h2>Enlaces entrantes ({{ formatNumber(inlinks.length) }})</h2>
+        <h2>
+          Enlaces entrantes ({{ formatNumber(inlinks.length) }} de {{ formatNumber(inlinksTotal) }})
+        </h2>
+        <p class="small muted" style="margin: 4px 0 0">Estas páginas enlazan a esta URL.</p>
+        <p v-if="inlinksTruncated" class="small muted" style="margin: 4px 0 0">
+          Mostrando los primeros {{ formatNumber(inlinks.length) }}.
+        </p>
         <div v-if="inlinks.length === 0" class="empty">Ninguna página rastreada enlaza aquí.</div>
         <div v-else class="table-wrap" style="margin-top: 10px">
           <table>

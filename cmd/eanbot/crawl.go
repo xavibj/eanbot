@@ -144,7 +144,9 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	broken, err := st.BrokenLinks(crawl.ID)
+	// Only the count is needed here (the crawl summary prints "Enlaces
+	// rotos: N"); limit=1 avoids fetching the actual broken pages.
+	_, brokenTotal, err := st.BrokenLinks(crawl.ID, 1, 0)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -153,7 +155,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if *jsonOutput {
 		printCrawlJSON(stdout, finished, summary, stats)
 	} else {
-		printCrawlSummary(stdout, finished, summary, stats, len(broken))
+		printCrawlSummary(stdout, finished, summary, stats, brokenTotal)
 	}
 
 	switch status {

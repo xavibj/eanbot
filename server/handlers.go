@@ -163,18 +163,8 @@ func (s *Server) handleListPages(w http.ResponseWriter, r *http.Request, id int6
 		return
 	}
 
+	limit, offset := parseLimitOffset(r)
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit < 1 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	offset, _ := strconv.Atoi(q.Get("offset"))
-	if offset < 0 {
-		offset = 0
-	}
 
 	filter := store.PageFilter{
 		Status: q.Get("status"),
@@ -205,7 +195,7 @@ func (s *Server) handleListPages(w http.ResponseWriter, r *http.Request, id int6
 }
 
 func (s *Server) handleGetPage(w http.ResponseWriter, r *http.Request, crawlID, pageID int64) {
-	page, out, in, err := s.st.GetPage(crawlID, pageID)
+	detail, err := s.st.GetPage(crawlID, pageID)
 	if errors.Is(err, store.ErrNotFound) {
 		s.notFound(w)
 		return
@@ -214,22 +204,47 @@ func (s *Server) handleGetPage(w http.ResponseWriter, r *http.Request, crawlID, 
 		s.internalError(w, err)
 		return
 	}
+	out := detail.Outlinks
 	if out == nil {
 		out = []store.Link{}
 	}
+	in := detail.Inlinks
 	if in == nil {
 		in = []store.Link{}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"page":     page,
-		"outlinks": out,
-		"inlinks":  in,
+		"page":           detail.Page,
+		"outlinks":       out,
+		"inlinks":        in,
+		"outlinks_total": detail.OutlinksTotal,
+		"inlinks_total":  detail.InlinksTotal,
 	})
 }
 
+// parseLimitOffset extracts and clamps the limit/offset query params shared
+// by the paginated /pages and /broken endpoints (limit defaults to 100,
+// capped at 1000; offset defaults to 0).
+func parseLimitOffset(r *http.Request) (limit, offset int) {
+	q := r.URL.Query()
+	limit, _ = strconv.Atoi(q.Get("limit"))
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	offset, _ = strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 func (s *Server) handleBroken(w http.ResponseWriter, r *http.Request, id int64) {
-	broken, err := s.st.BrokenLinks(id)
+	limit, offset := parseLimitOffset(r)
+
+	broken, total, err := s.st.BrokenLinks(id, limit, offset)
 	if errors.Is(err, store.ErrNotFound) {
 		s.notFound(w)
 		return
@@ -239,13 +254,13 @@ func (s *Server) handleBroken(w http.ResponseWriter, r *http.Request, id int64) 
 		return
 	}
 	if broken == nil {
-		broken = []store.BrokenLink{}
-	}
-	for i := range broken {
-		if broken[i].Referrers == nil {
-			broken[i].Referrers = []store.Link{}
-		}
+		broken = []store.BrokenPage{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"broken": broken})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"broken": broken,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }

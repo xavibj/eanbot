@@ -13,7 +13,7 @@ import (
 // Inserting a page whose URL already exists in the same crawl fails (the
 // UNIQUE(crawl_id, url) constraint).
 func (s *Store) AddPage(p Page, links []Link) (int64, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.w.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("store: add page: %w", err)
 	}
@@ -63,10 +63,13 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// GetPage returns a page plus its outgoing links (out) and the links from
-// other pages in the same crawl that point to it (in, with FromURL filled).
-func (s *Store) GetPage(crawlID, pageID int64) (*Page, []Link, []Link, error) {
-	row := s.db.QueryRow(
+// GetPage returns a page plus its outgoing links (Outlinks) and the links
+// from other pages in the same crawl that point to it (Inlinks, with
+// FromURL filled). Both lists are capped at LinkLimit; OutlinksTotal and
+// InlinksTotal report the true counts so callers know when the list was
+// truncated.
+func (s *Store) GetPage(crawlID, pageID int64) (*PageDetail, error) {
+	row := s.r.QueryRow(
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
 			title, description, canonical, meta_robots, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
@@ -75,30 +78,43 @@ func (s *Store) GetPage(crawlID, pageID int64) (*Page, []Link, []Link, error) {
 	)
 	p, err := scanPage(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil, ErrNotFound
+		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
+		return nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
 	}
 
-	out, err := s.linksFromPage(p.ID)
+	out, outTotal, err := s.linksFromPage(p.ID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
+		return nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
 	}
-	in, err := s.linksToURL(crawlID, p.URL)
+	in, inTotal, err := s.linksToURL(crawlID, p.URL)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
+		return nil, fmt.Errorf("store: get page %d in crawl %d: %w", pageID, crawlID, err)
 	}
-	return p, out, in, nil
+	return &PageDetail{
+		Page:          *p,
+		Outlinks:      out,
+		Inlinks:       in,
+		OutlinksTotal: outTotal,
+		InlinksTotal:  inTotal,
+	}, nil
 }
 
-func (s *Store) linksFromPage(pageID int64) ([]Link, error) {
-	rows, err := s.db.Query(
-		`SELECT from_page_id, to_url, text, nofollow, in_scope FROM links WHERE from_page_id = ? ORDER BY id`,
-		pageID,
+// linksFromPage returns up to LinkLimit outgoing links of a page, ordered by
+// id, plus the true total (via links_from).
+func (s *Store) linksFromPage(pageID int64) ([]Link, int, error) {
+	var total int
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM links WHERE from_page_id = ?`, pageID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.r.Query(
+		`SELECT from_page_id, to_url, text, nofollow, in_scope FROM links WHERE from_page_id = ? ORDER BY id LIMIT ?`,
+		pageID, LinkLimit,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -110,25 +126,33 @@ func (s *Store) linksFromPage(pageID int64) ([]Link, error) {
 			inScope  int
 		)
 		if err := rows.Scan(&l.FromPageID, &l.ToURL, &l.Text, &nofollow, &inScope); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		l.NoFollow = nofollow != 0
 		l.InScope = inScope != 0
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
-func (s *Store) linksToURL(crawlID int64, url string) ([]Link, error) {
-	rows, err := s.db.Query(
+// linksToURL returns up to LinkLimit links (from other pages of the same
+// crawl) pointing at url, ordered by id, with FromURL filled, plus the true
+// total (via links_crawl_to).
+func (s *Store) linksToURL(crawlID int64, url string) ([]Link, int, error) {
+	var total int
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM links WHERE crawl_id = ? AND to_url = ?`, crawlID, url).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.r.Query(
 		`SELECT l.from_page_id, p.url, l.to_url, l.text, l.nofollow, l.in_scope
 		 FROM links l JOIN pages p ON p.id = l.from_page_id
 		 WHERE l.crawl_id = ? AND l.to_url = ?
-		 ORDER BY p.url, l.id`,
-		crawlID, url,
+		 ORDER BY l.id LIMIT ?`,
+		crawlID, url, LinkLimit,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -140,18 +164,18 @@ func (s *Store) linksToURL(crawlID int64, url string) ([]Link, error) {
 			inScope  int
 		)
 		if err := rows.Scan(&l.FromPageID, &l.FromURL, &l.ToURL, &l.Text, &nofollow, &inScope); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		l.NoFollow = nofollow != 0
 		l.InScope = inScope != 0
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // FindPageByURL returns the page with the given URL in the given crawl.
 func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error) {
-	row := s.db.QueryRow(
+	row := s.r.QueryRow(
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
 			title, description, canonical, meta_robots, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
@@ -203,17 +227,11 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 
 	var total int
 	countQuery := "SELECT COUNT(*) FROM pages WHERE " + whereClause
-	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	if err := s.r.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("store: count pages in crawl %d: %w", crawlID, err)
 	}
 
-	limit := f.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
+	limit := clampLimit(f.Limit)
 
 	selectQuery := `SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
 			title, description, canonical, meta_robots, noindex, nofollow,
@@ -221,7 +239,7 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 		 FROM pages WHERE ` + whereClause + ` ORDER BY id LIMIT ? OFFSET ?`
 	selectArgs := append(append([]any{}, args...), limit, f.Offset)
 
-	rows, err := s.db.Query(selectQuery, selectArgs...)
+	rows, err := s.r.Query(selectQuery, selectArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: list pages in crawl %d: %w", crawlID, err)
 	}

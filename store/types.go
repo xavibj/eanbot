@@ -74,8 +74,26 @@ type Summary struct {
 	AvgDurationMs int64          `json:"avg_duration_ms"`
 }
 
-// BrokenLink pairs a broken page with the links that pointed to it.
-type BrokenLink struct {
-	Page      Page   `json:"page"`
-	Referrers []Link `json:"referrers"`
+// LinkLimit caps the number of outlinks/inlinks GetPage returns, so a page
+// with an unusually large number of links never turns a single request into
+// an unbounded response.
+const LinkLimit = 500
+
+// PageDetail is a page plus its links, as returned by GetPage. Outlinks and
+// Inlinks are capped at LinkLimit (ordered by id); OutlinksTotal and
+// InlinksTotal report the true counts.
+type PageDetail struct {
+	Page          Page   `json:"page"`
+	Outlinks      []Link `json:"outlinks"`
+	Inlinks       []Link `json:"inlinks"`
+	OutlinksTotal int    `json:"outlinks_total"`
+	InlinksTotal  int    `json:"inlinks_total"`
+}
+
+// BrokenPage pairs a broken page with the number of links in the crawl that
+// point to it. The links themselves are fetched separately (Referrers or
+// GetPage's Inlinks) to keep BrokenLinks a single, cheap, paginated query.
+type BrokenPage struct {
+	Page           Page `json:"page"`
+	ReferrersCount int  `json:"referrers_count"`
 }
