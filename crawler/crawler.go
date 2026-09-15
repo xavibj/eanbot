@@ -46,6 +46,7 @@ type Stats struct {
 	Fetched, Blocked, Errors int // Fetched counts any request made (any status code)
 	Queued                   int // URLs left unvisited because of limits
 	RobotsTxt                string
+	RobotsError              string // why robots.txt could not be applied ("" when it was fetched)
 	Sitemaps                 int    // URLs discovered via sitemaps
 	FinalHost                string // effective scope host, after following any seed-level cross-host redirect chain
 }
@@ -172,7 +173,7 @@ func resolveSeedChain(ctx context.Context, cfg Config, f Fetcher, s Sink, seedUR
 		if !currentRobots.Allowed(cfg.RobotsToken, robotsPath(currentURL)) {
 			blocked++
 			fr.seen[currentURL] = true
-			s.Page(Page{URL: currentURL, Depth: 0, Blocked: true, FetchedAt: time.Now()})
+			s.Page(Page{URL: currentURL, Depth: 0, Blocked: true, Error: currentRobots.BlockReason(), FetchedAt: time.Now()})
 			return result()
 		}
 
@@ -252,15 +253,21 @@ func resolveRobots(ctx context.Context, cfg Config, f Fetcher, su *url.URL, stat
 	robotsURL := su.Scheme + "://" + su.Host + "/robots.txt"
 	resp, err := f.Fetch(ctx, robotsURL)
 	if err != nil || resp == nil {
-		return DisallowAll()
+		if err == nil {
+			err = errors.New("respuesta vacía")
+		}
+		stats.RobotsError = "robots.txt: " + err.Error()
+		return DisallowAllBecause(stats.RobotsError)
 	}
 	stats.RobotsTxt = string(resp.Body)
+	stats.RobotsError = ""
 
 	switch {
 	case resp.Status >= 200 && resp.Status < 300:
 		return ParseRobots(bytes.NewReader(resp.Body))
 	case resp.Status >= 500:
-		return DisallowAll()
+		stats.RobotsError = fmt.Sprintf("robots.txt: HTTP %d", resp.Status)
+		return DisallowAllBecause(stats.RobotsError)
 	default:
 		return AllowAll()
 	}
@@ -301,7 +308,7 @@ func runWorker(ctx context.Context, cfg Config, f Fetcher, s Sink, robots *Robot
 		if !robots.Allowed(cfg.RobotsToken, robotsPath(u)) {
 			st.blocked++
 			st.mu.Unlock()
-			s.Page(Page{URL: u, Depth: depth, Blocked: true, FetchedAt: time.Now()})
+			s.Page(Page{URL: u, Depth: depth, Blocked: true, Error: robots.BlockReason(), FetchedAt: time.Now()})
 			continue
 		}
 

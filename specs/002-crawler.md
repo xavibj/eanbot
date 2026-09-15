@@ -104,6 +104,7 @@ type Stats struct {
     Fetched, Blocked, Errors int // Fetched cuenta cualquier petición realizada (cualquier código)
     Queued                   int // URLs que quedaron sin visitar por límites
     RobotsTxt                string // robots.txt del host final (ver "Motor")
+    RobotsError              string // motivo por el que robots.txt no se pudo aplicar ("" si se obtuvo): "robots.txt: HTTP 503" o "robots.txt: <error de red/TLS>"
     Sitemaps                 int    // URLs descubiertas vía sitemaps
     FinalHost                string // host efectivo del ámbito (ver "Motor", cambio de ámbito de la semilla)
 }
@@ -249,7 +250,11 @@ sí misma; el motor la protege con un mutex.
    `p.Depth+1 <= MaxDepth` → Push(depth+1). `RedirectTo` en ámbito →
    Push(misma profundidad). `Canonical` no se encola.
 7. URL prohibida por robots → `Page{Blocked:true, Status:0}` al Sink, no cuenta
-   en `Fetched`, cuenta en `Blocked`.
+   en `Fetched`, cuenta en `Blocked`. Si el bloqueo se debe a que robots.txt no
+   pudo obtenerse (5xx o error de red/TLS, ver «Obtención»), `Page.Error`
+   lleva el motivo (`robots.txt: HTTP 503`, `robots.txt: <error>`) y
+   `Stats.RobotsError` el mismo texto; un bloqueo por regla deja `Error` vacío.
+   La CLI muestra ese motivo junto a `BLOQ` en la línea de progreso.
 8. Error del Fetcher → `Page{Error: err.Error()}`; cuenta en Fetched y Errors.
 9. Termina: frontier vacía y ningún worker ocupado, o `Fetched == MaxPages`
    (las URLs en cola restantes se cuentan en `Stats.Queued`), o ctx cancelado

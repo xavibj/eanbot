@@ -147,6 +147,57 @@ func TestRunRobotsDisallowOn5xx(t *testing.T) {
 	if len(pages) != 1 || !pages[0].Blocked || pages[0].Status != 0 {
 		t.Errorf("pages = %+v, want a single Blocked page with Status 0", pages)
 	}
+	if len(pages) == 1 && pages[0].Error != "robots.txt: HTTP 500" {
+		t.Errorf("blocked page Error = %q, want %q", pages[0].Error, "robots.txt: HTTP 500")
+	}
+	if stats.RobotsError != "robots.txt: HTTP 500" {
+		t.Errorf("stats.RobotsError = %q, want %q", stats.RobotsError, "robots.txt: HTTP 500")
+	}
+}
+
+func TestRunRobotsFetchErrorExplainsBlock(t *testing.T) {
+	f := newFakeFetcher()
+	f.setErr("https://example.com/robots.txt", errors.New("tls: failed to verify certificate"))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, MaxPages: 10, MaxDepth: 10, UseSitemaps: false}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	pages := sink.all()
+	if len(pages) != 1 || !pages[0].Blocked {
+		t.Fatalf("pages = %+v, want a single Blocked page", pages)
+	}
+	want := "robots.txt: tls: failed to verify certificate"
+	if pages[0].Error != want {
+		t.Errorf("blocked page Error = %q, want %q", pages[0].Error, want)
+	}
+	if stats.RobotsError != want {
+		t.Errorf("stats.RobotsError = %q, want %q", stats.RobotsError, want)
+	}
+}
+
+func TestRunRobotsRuleBlockHasNoError(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://example.com/robots.txt", robotsResponse("User-agent: *\nDisallow: /private\n"))
+	f.set("https://example.com/", htmlResponse(`<a href="/private/x">x</a>`))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, MaxPages: 10, MaxDepth: 10, UseSitemaps: false}
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.RobotsError != "" {
+		t.Errorf("stats.RobotsError = %q, want empty", stats.RobotsError)
+	}
+	for _, p := range sink.all() {
+		if p.Blocked && p.Error != "" {
+			t.Errorf("rule-blocked page %s has Error %q, want empty", p.URL, p.Error)
+		}
+	}
 }
 
 func TestRunRobotsSpecificGroup(t *testing.T) {

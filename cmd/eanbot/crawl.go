@@ -218,7 +218,11 @@ func (sk *progressSink) Page(p crawler.Page) {
 	}
 
 	if !sk.quiet {
-		fmt.Fprintf(sk.stderr, "[%4d] %-4s %-11s %s\n", sk.idx, crawlerPageCode(p), p.ContentType, p.URL)
+		line := fmt.Sprintf("[%4d] %-4s %-11s %s", sk.idx, crawlerPageCode(p), p.ContentType, p.URL)
+		if p.Blocked && p.Error != "" {
+			line += " (" + p.Error + ")"
+		}
+		fmt.Fprintln(sk.stderr, line)
 	}
 }
 

@@ -14,6 +14,7 @@ type Robots struct {
 	groups      []robotsGroup
 	sitemapURLs []string
 	disallowAll bool
+	reason      string // why everything is disallowed (robots.txt unavailable); "" for rule-based files
 }
 
 type robotsGroup struct {
@@ -116,6 +117,22 @@ func AllowAll() *Robots {
 // DisallowAll returns a Robots value that forbids crawling anything.
 func DisallowAll() *Robots {
 	return &Robots{disallowAll: true}
+}
+
+// DisallowAllBecause is DisallowAll with a human-readable reason, used when
+// robots.txt could not be fetched (5xx, network or TLS error). The reason is
+// surfaced on every blocked page so the operator can tell "blocked by a
+// rule" from "robots.txt unavailable".
+func DisallowAllBecause(reason string) *Robots {
+	return &Robots{disallowAll: true, reason: reason}
+}
+
+// BlockReason returns the reason attached by DisallowAllBecause, or "".
+func (r *Robots) BlockReason() string {
+	if r == nil {
+		return ""
+	}
+	return r.reason
 }
 
 // Allowed reports whether path (which includes the query string, if any) may
