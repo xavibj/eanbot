@@ -83,8 +83,8 @@ almacenado es el resultante tras defaults.
 | `POST /api/crawls/{id}/cancel` | `200 {"crawl":crawl}`; si no estaba en marcha, 200 igualmente |
 | `DELETE /api/crawls/{id}` | `204`; si está en marcha se cancela antes |
 | `GET /api/crawls/{id}/pages?status=&q=&limit=&offset=` | `200 {"pages":[page...], "total":N, "limit":L, "offset":O}` |
-| `GET /api/crawls/{id}/pages/{page_id}` | `200 {"page":page, "outlinks":[link...], "inlinks":[link...]}` |
-| `GET /api/crawls/{id}/broken` | `200 {"broken":[{"page":page,"referrers":[link...]}...]}` |
+| `GET /api/crawls/{id}/pages/{page_id}` | `200 {"page":page, "outlinks":[link...], "inlinks":[link...], "outlinks_total":N, "inlinks_total":N}` (listas acotadas a 500) |
+| `GET /api/crawls/{id}/broken?limit=&offset=` | `200 {"broken":[{"page":page,"referrers_count":N}...], "total":T, "limit":L, "offset":O}` (limit por defecto 100, máx. 1000) |
 
 `crawl`, `summary`, `page`, `link` son los structs de `store` serializados
 (campos `snake_case` de 003). `{id}` no numérico → 404. `limit` fuera de
@@ -140,14 +140,16 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      rotos». Páginas: filtro por estado (select), búsqueda (input con
      debounce 300 ms), tabla (código, URL, título, tipo, profundidad, ms) con
      paginación (100 por página); clic en fila → `#/crawls/{id}/pages/{pid}`.
-     Enlaces rotos: por cada página rota, URL, código/error y lista de
-     referrers (URL enlazable a su detalle si existe, y texto del ancla).
+     Enlaces rotos: tabla paginada (100 por página, misma paginación que
+     Páginas) con código o error, URL y nº de referrers; clic en la fila →
+     detalle de la página, cuya lista de enlaces entrantes son los referrers.
      Auto-refresco cada 2 s mientras `running`. En la línea de config se
      muestra `origen: <ip>` si `config.origin` no está vacío y `tls sin
      verificar` si `config.insecure_tls`.
   4. **Detalle de página**: todos los campos de `page` en una lista de
      definición; enlaces salientes (URL, texto, nofollow, en ámbito) y
-     entrantes (URL origen, texto).
+     entrantes (URL origen, texto), cada lista con su cabecera «N de total»
+     y, si `total > N`, una nota «mostrando los primeros N».
 - Cualquier cambio de filtro limpia resultados obsoletos antes de pedir.
 
 ## Tests exigidos (`httptest` contra `Handler()`, Fetcher falso)
@@ -162,7 +164,7 @@ incluye (y `"origin":"","insecure_tls":false` cuando no vienen); POST con
 lo que sirvió el Fetcher falso; POST inválido → 400 con TODOS los errores;
 JSON malformado; 405 con Allow; 404 JSON en id inexistente, id no numérico,
 ruta desconocida; list; pages con filtros, paginación y status inválido;
-page detail con out/in links; broken; cancel (Fetcher falso lento que
+page detail con out/in links y totales; broken paginado (total, limit/offset, referrers_count); cancel (Fetcher falso lento que
 respeta ctx) → status `cancelled`; delete → 204 y luego 404; estáticos: `/`
 200 `text/html` con `<div id="app"`, fallback SPA, `Content-Type` de assets
 referenciados por `index.html`, `Cache-Control`.

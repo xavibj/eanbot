@@ -10,8 +10,16 @@ tipos de registro; la conversión la hacen `server` y `cmd`).
 func Open(path string) (*Store, error)  // crea el fichero y el esquema si no existen
 func (s *Store) Close() error
 ```
-DSN `file:<path>?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`,
-`SetMaxOpenConns(1)`. Esquema idempotente (`CREATE TABLE IF NOT EXISTS`).
+DSN `file:<path>?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`.
+
+**Dos pools sobre el mismo fichero**: un pool de **escritura** con
+`SetMaxOpenConns(1)` (todas las escrituras serializadas: `CreateCrawl`,
+`SetRobots`, `FinishCrawl`, `AddPage`, `DeleteCrawl`, y el esquema/`init`) y un
+pool de **lectura** con `SetMaxOpenConns(4)` para todo lo demás. WAL permite
+lectores concurrentes con un escritor, así que la interfaz no espera a las
+inserciones del rastreo ni una consulta larga bloquea al rastreo. Las pragmas
+del DSN se aplican por conexión, así que valen para ambos pools. `Close`
+cierra los dos. Esquema idempotente (`CREATE TABLE IF NOT EXISTS`).
 Al abrir, cualquier crawl en estado `running` pasa a `failed` con
 `error = "interrumpido"` (el proceso anterior murió).
 
@@ -128,6 +136,16 @@ type Link struct {
     InScope    bool   `json:"in_scope"`
 }
 
+type PageDetail struct {
+    Page          Page   `json:"page"`
+    Outlinks      []Link `json:"outlinks"`       // como máximo LinkLimit (500), orden por id
+    Inlinks       []Link `json:"inlinks"`        // como máximo LinkLimit (500), con FromURL, orden por id
+    OutlinksTotal int    `json:"outlinks_total"`
+    InlinksTotal  int    `json:"inlinks_total"`
+}
+
+const LinkLimit = 500
+
 type PageFilter struct {
     Status string // "", "2xx", "3xx", "4xx", "5xx", "error" (status 0 && !blocked), "blocked"
     Query  string // LIKE %q% sobre url o title
@@ -149,9 +167,9 @@ type Summary struct {
     AvgDurationMs int64     `json:"avg_duration_ms"` // solo páginas con status > 0
 }
 
-type BrokenLink struct {
-    Page      Page   `json:"page"`        // la página rota (status>=400 o error)
-    Referrers []Link `json:"referrers"`   // enlaces cuyo to_url == page.url (con FromURL)
+type BrokenPage struct {
+    Page           Page `json:"page"`            // la página rota (status>=400, o status 0 sin bloqueo)
+    ReferrersCount int  `json:"referrers_count"` // nº de enlaces del crawl cuyo to_url == page.url
 }
 
 func (s *Store) CreateCrawl(seed string, config json.RawMessage) (*Crawl, error) // status running, started_at now UTC
@@ -161,23 +179,40 @@ func (s *Store) GetCrawl(id int64) (*Crawl, error)                     // ErrNot
 func (s *Store) ListCrawls() ([]Crawl, error)                          // más recientes primero
 func (s *Store) DeleteCrawl(id int64) error                            // cascade; ErrNotFound
 func (s *Store) AddPage(p Page, links []Link) (int64, error)           // tx: insert page + links, pages_count++; URL duplicada en el mismo crawl → error
-func (s *Store) GetPage(crawlID, pageID int64) (*Page, []Link /*out*/, []Link /*in*/, error) // ErrNotFound
+func (s *Store) GetPage(crawlID, pageID int64) (*PageDetail, error)        // ErrNotFound
 func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error)
 func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int /*total con filtro*/, error)
 func (s *Store) Summarize(crawlID int64) (*Summary, error)             // ErrNotFound si no existe el crawl
-func (s *Store) BrokenLinks(crawlID int64) ([]BrokenLink, error)       // ordenado por url; referrers ordenados por from_url
+func (s *Store) BrokenLinks(crawlID int64, limit, offset int) ([]BrokenPage, int /*total*/, error) // ordenado por url; limit por defecto 100, máx. 1000; ErrNotFound si no existe el crawl
+func (s *Store) Referrers(crawlID int64, toURLs []string, perURL int) (map[string][]Link, error) // hasta perURL referrers (con FromURL, orden por id) por cada URL; una sola consulta (window function ROW_NUMBER() OVER (PARTITION BY to_url ORDER BY id))
 func (s *Store) Outlinks(crawlID int64) (map[string]int, error)        // opcional: to_url → nº de referrers (no requerido en v1)
 ```
 
 `FinishCrawl` sobre un crawl que ya no está `running` no cambia nada y no
 devuelve error (idempotente), salvo que no exista (ErrNotFound).
 
+## Rendimiento (por qué así)
+
+Un rastreo real de 377.765 páginas dejó la interfaz colgada: `BrokenLinks`
+hacía una consulta por página rota (35.000) y devolvía todo sin paginar, y la
+única conexión encolaba lecturas tras las escrituras. Reglas:
+
+- `BrokenLinks` es **una sola consulta** paginada: las páginas rotas del crawl
+  (`status >= 400` OR (`status = 0` AND `blocked = 0`)) ordenadas por url con
+  `LIMIT/OFFSET`, y `ReferrersCount` como subconsulta correlacionada
+  `(SELECT COUNT(*) FROM links l WHERE l.crawl_id = p.crawl_id AND l.to_url = p.url)`
+  (usa `links_crawl_to`). `total` con un `COUNT(*)` aparte sobre el mismo filtro.
+- Los referrers concretos se piden aparte (`Referrers`, acotado por URL) o se
+  ven en `GetPage` como inlinks.
+- `GetPage` acota outlinks e inlinks a `LinkLimit` y devuelve los totales.
+- Ninguna función devuelve listas sin acotar.
+
 ## Tests exigidos
 
 Tabla, BBDD real en `t.TempDir()`: esquema idempotente (Open dos veces);
 CreateCrawl/GetCrawl/ListCrawls orden; FinishCrawl estados e idempotencia;
 running→failed al reabrir; AddPage incrementa `pages_count` y rechaza URL
-duplicada; GetPage devuelve out/in links con FromURL; ListPages filtros
+duplicada; GetPage devuelve out/in links con FromURL, acotados a LinkLimit y con totales (test con más de LinkLimit inlinks: usa una constante pequeña o inserta 501 links); ListPages filtros
 (cada valor de Status, Query, Limit/Offset, total); Summarize contadores y
-content_types; BrokenLinks con referrers; DeleteCrawl cascade; ErrNotFound en
+content_types; BrokenLinks paginado con referrers_count y total (una página rota con 3 referrers, otra con 0; limit/offset); Referrers con perURL menor que el nº de enlaces; lectura concurrente: con una transacción de escritura abierta (AddPage a medias o `BEGIN IMMEDIATE` sobre el pool de escritura) una lectura (`GetCrawl`) termina en menos de 1 s; DeleteCrawl cascade; ErrNotFound en
 todos los getters.
