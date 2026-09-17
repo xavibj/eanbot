@@ -84,6 +84,7 @@ almacenado es el resultante tras defaults.
 | `DELETE /api/crawls/{id}` | `204`; si está en marcha se cancela antes |
 | `GET /api/crawls/{id}/pages?status=&q=&limit=&offset=` | `200 {"pages":[page...], "total":N, "limit":L, "offset":O}` |
 | `GET /api/crawls/{id}/pages/{page_id}` | `200 {"page":page, "outlinks":[link...], "inlinks":[link...], "outlinks_total":N, "inlinks_total":N}` (listas acotadas a 500) |
+| `GET /api/crawls/{id}/report[?format=json\|md][&download=1]` | informe por agregados, ver `specs/008-informe.md` |
 | `GET /api/crawls/{id}/broken?limit=&offset=` | `200 {"broken":[{"page":page,"referrers_count":N}...], "total":T, "limit":L, "offset":O}` (limit por defecto 100, máx. 1000) |
 
 `crawl`, `summary`, `page`, `link` son los structs de `store` serializados

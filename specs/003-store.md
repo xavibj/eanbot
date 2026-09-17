@@ -203,6 +203,8 @@ func (s *Store) ListCrawls() ([]Crawl, error)                          // más r
 func (s *Store) DeleteCrawl(id int64) error                            // cascade; ErrNotFound
 func (s *Store) AddPage(p Page, links []Link) (int64, error)           // = AddPages con un elemento
 func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) // UNA transacción: inserta páginas y links, actualiza pages_count, contadores y crawl_content_types; URL duplicada → error y rollback de todo el lote
+func (s *Store) ForEachPage(ctx context.Context, crawlID int64, fn func(Page) error) error // streaming por id (spec 008)
+func (s *Store) BrokenReferrerCounts(crawlID int64, limit int) ([]BrokenPage, int, error) // spec 008
 func (s *Store) Checkpoint(mode string) error                          // PRAGMA wal_checkpoint(mode): PASSIVE|FULL|RESTART|TRUNCATE, sobre el pool de escritura
 func NewBatchWriter(s *Store, crawlID int64, maxItems int, maxDelay time.Duration) *BatchWriter
 func (b *BatchWriter) Add(p Page, links []Link)   // encola; vuelca cuando hay maxItems o han pasado maxDelay desde el primer elemento pendiente
