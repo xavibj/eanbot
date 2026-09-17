@@ -50,7 +50,19 @@ CREATE TABLE crawls (
   finished_at TEXT,
   pages_count INTEGER NOT NULL DEFAULT 0, -- filas en pages (incluye bloqueadas y errores)
   error       TEXT NOT NULL DEFAULT '',
-  robots_txt  TEXT NOT NULL DEFAULT ''
+  robots_txt  TEXT NOT NULL DEFAULT '',
+  -- contadores mantenidos por AddPages (resumen O(1)); ver "Contadores"
+  count_2xx     INTEGER NOT NULL DEFAULT 0,
+  count_3xx     INTEGER NOT NULL DEFAULT 0,
+  count_4xx     INTEGER NOT NULL DEFAULT 0,
+  count_5xx     INTEGER NOT NULL DEFAULT 0,
+  count_errors  INTEGER NOT NULL DEFAULT 0,   -- status 0 y no bloqueada
+  count_blocked INTEGER NOT NULL DEFAULT 0,
+  count_noindex INTEGER NOT NULL DEFAULT 0,
+  max_depth     INTEGER NOT NULL DEFAULT 0,
+  duration_sum  INTEGER NOT NULL DEFAULT 0,   -- suma de duration_ms de páginas con status > 0
+  duration_n    INTEGER NOT NULL DEFAULT 0,   -- nº de páginas con status > 0
+  counters_ok   INTEGER NOT NULL DEFAULT 0    -- 1 cuando los contadores reflejan pages (migración)
 );
 CREATE TABLE pages (
   id           INTEGER PRIMARY KEY,
@@ -75,6 +87,12 @@ CREATE TABLE pages (
   UNIQUE (crawl_id, url)
 );
 CREATE INDEX pages_crawl_status ON pages(crawl_id, status);
+CREATE TABLE crawl_content_types (
+  crawl_id     INTEGER NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+  content_type TEXT NOT NULL,
+  n            INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (crawl_id, content_type)
+);
 CREATE TABLE links (
   id           INTEGER PRIMARY KEY,
   crawl_id     INTEGER NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
@@ -146,6 +164,11 @@ type PageDetail struct {
 
 const LinkLimit = 500
 
+type PageWithLinks struct {
+    Page  Page
+    Links []Link
+}
+
 type PageFilter struct {
     Status string // "", "2xx", "3xx", "4xx", "5xx", "error" (status 0 && !blocked), "blocked"
     Query  string // LIKE %q% sobre url o title
@@ -178,7 +201,14 @@ func (s *Store) FinishCrawl(crawlID int64, status, errMsg string) error // statu
 func (s *Store) GetCrawl(id int64) (*Crawl, error)                     // ErrNotFound
 func (s *Store) ListCrawls() ([]Crawl, error)                          // más recientes primero
 func (s *Store) DeleteCrawl(id int64) error                            // cascade; ErrNotFound
-func (s *Store) AddPage(p Page, links []Link) (int64, error)           // tx: insert page + links, pages_count++; URL duplicada en el mismo crawl → error
+func (s *Store) AddPage(p Page, links []Link) (int64, error)           // = AddPages con un elemento
+func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) // UNA transacción: inserta páginas y links, actualiza pages_count, contadores y crawl_content_types; URL duplicada → error y rollback de todo el lote
+func (s *Store) Checkpoint(mode string) error                          // PRAGMA wal_checkpoint(mode): PASSIVE|FULL|RESTART|TRUNCATE, sobre el pool de escritura
+func NewBatchWriter(s *Store, crawlID int64, maxItems int, maxDelay time.Duration) *BatchWriter
+func (b *BatchWriter) Add(p Page, links []Link)   // encola; vuelca cuando hay maxItems o han pasado maxDelay desde el primer elemento pendiente
+func (b *BatchWriter) Flush() error               // vuelca lo pendiente (síncrono)
+func (b *BatchWriter) Close() error               // Flush + para el temporizador; devuelve el primer error de volcado no notificado
+func (b *BatchWriter) Err() error                 // último error de volcado (nil si ninguno)
 func (s *Store) GetPage(crawlID, pageID int64) (*PageDetail, error)        // ErrNotFound
 func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error)
 func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int /*total con filtro*/, error)
@@ -190,6 +220,44 @@ func (s *Store) Outlinks(crawlID int64) (map[string]int, error)        // opcion
 
 `FinishCrawl` sobre un crawl que ya no está `running` no cambia nada y no
 devuelve error (idempotente), salvo que no exista (ErrNotFound).
+
+## Contadores, lotes y checkpoints (rastreo de 1,1 M de páginas, 2026-09-17)
+
+**Contadores.** `Summarize` no recorre `pages`: lee los `count_*`, `max_depth`,
+`duration_sum/duration_n` (media entera, 0 si `duration_n = 0`) de la fila de
+`crawls` y `content_types` de `crawl_content_types`. `AddPages` los actualiza
+en la misma transacción (`UPDATE crawls SET count_2xx = count_2xx + ?, ...`
+y `INSERT INTO crawl_content_types ... ON CONFLICT DO UPDATE SET n = n + excluded.n`,
+solo para `content_type <> ''`). `Total` = `pages_count`. `ListPages` usa los
+contadores para `total` cuando `Query == ""` (`""` → `pages_count`, `2xx` →
+`count_2xx`, ..., `error` → `count_errors`, `blocked` → `count_blocked`); con
+`Query` hace `COUNT(*)`.
+
+**Migración.** El esquema es idempotente: `Open` añade con `ALTER TABLE ... ADD
+COLUMN` las columnas que falten (comprobando `PRAGMA table_info(crawls)`) y crea
+`crawl_content_types` si no existe. Después, para cada crawl con `counters_ok = 0`,
+recalcula los contadores y los content types desde `pages` en una transacción y
+pone `counters_ok = 1`. Un crawl recién creado nace con `counters_ok = 1`.
+
+**Lotes.** `AddPages` escribe un lote en una transacción. `BatchWriter` es el
+único camino recomendado para el rastreo: acumula hasta `maxItems` (server y CLI
+usan 100) o `maxDelay` (1 s) y vuelca; un temporizador interno garantiza el
+volcado por tiempo sin que llegue otra página. `Add` nunca bloquea al motor más
+que el propio volcado; los errores de volcado se guardan (`Err`) y el llamante
+los registra. Al terminar o cancelar un rastreo se llama a `Close` **antes** de
+`FinishCrawl`. Con lotes de 100, un millón de páginas son 10.000 commits en vez de
+un millón: el WAL crece mucho menos entre checkpoints.
+
+**Checkpoints.** `Open` añade al DSN `_pragma=journal_size_limit(67108864)`
+(64 MiB: tras un checkpoint el WAL se trunca a ese tamaño) y arranca una goroutine
+que cada 60 s ejecuta `Checkpoint("RESTART")` sobre el pool de escritura
+(espera, vía `busy_timeout`, a que los lectores en curso terminen; con lecturas
+cortas hay hueco y el siguiente escritor reinicia el WAL desde cero).
+`FinishCrawl` y `DeleteCrawl` ejecutan `Checkpoint("TRUNCATE")` tras el commit;
+un fallo de checkpoint se registra pero no hace fallar la operación. `Close`
+para la goroutine y hace un último `TRUNCATE`. Motivo: el 2026-09-17 el WAL
+llegó a 45 GB por lectores continuos (checkpoint starvation) y el resumen tardaba
+74 s.
 
 ## Rendimiento (por qué así)
 
@@ -211,7 +279,17 @@ hacía una consulta por página rota (35.000) y devolvía todo sin paginar, y la
 
 Tabla, BBDD real en `t.TempDir()`: esquema idempotente (Open dos veces);
 CreateCrawl/GetCrawl/ListCrawls orden; FinishCrawl estados e idempotencia;
-running→failed al reabrir; AddPage incrementa `pages_count` y rechaza URL
+running→failed al reabrir; migración: una BBDD creada con el esquema antiguo
+(crear las tablas a mano sin las columnas `count_*` ni `crawl_content_types`,
+insertar un crawl y páginas) abre bien, gana las columnas y `Summarize` devuelve
+los contadores correctos con `counters_ok = 1`; AddPages en lote actualiza
+`pages_count`, contadores y content types, y una URL duplicada en el lote
+revierte el lote entero; Summarize coincide con un recuento directo sobre
+`pages` tras varios lotes; ListPages `total` por contadores para cada `Status`
+y por COUNT con `Query`; BatchWriter vuelca por `maxItems`, por `maxDelay`
+(test con `maxDelay` de 50 ms y espera), en `Close`, y expone el error de un
+volcado fallido (crawl inexistente); Checkpoint("TRUNCATE") deja el fichero
+`-wal` a 0 bytes tras escribir; AddPage incrementa `pages_count` y rechaza URL
 duplicada; GetPage devuelve out/in links con FromURL, acotados a LinkLimit y con totales (test con más de LinkLimit inlinks: usa una constante pequeña o inserta 501 links); ListPages filtros
 (cada valor de Status, Query, Limit/Offset, total); Summarize contadores y
 content_types; BrokenLinks paginado con referrers_count y total (una página rota con 3 referrers, otra con 0; limit/offset); Referrers con perURL menor que el nº de enlaces; lectura concurrente: con una transacción de escritura abierta (AddPage a medias o `BEGIN IMMEDIATE` sobre el pool de escritura) una lectura (`GetCrawl`) termina en menos de 1 s; DeleteCrawl cascade; ErrNotFound en

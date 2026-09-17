@@ -23,7 +23,7 @@ Dentro de `server`: `Manager` con `Start(cfg crawler.Config) (crawlID, error)`,
 `Cancel(id) bool`, `Running() []int64`. Por cada rastreo: `store.CreateCrawl`
 (config serializada como el objeto `config` de abajo), goroutine que llama a
 `crawler.Run` con un `context.WithCancel`, un `Sink` que hace
-`store.AddPage` (convirtiendo tipos) y, al terminar, `store.FinishCrawl` con
+`store.BatchWriter` (`NewBatchWriter(st, id, 100, time.Second)`, convirtiendo tipos; los errores de volcado se registran en el log), `Close()` del writer al terminar `crawler.Run` y, después, `store.FinishCrawl` con
 `done` (sin error), `cancelled` (ctx cancelado) o `failed` (otro error, texto en
 `error`). `Stats.RobotsTxt` se guarda con `SetRobots` en cuanto se conoce
 (el Sink puede recibirlo tras la primera página: el Manager lo guarda al
@@ -154,7 +154,7 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
 
 ## Tests exigidos (`httptest` contra `Handler()`, Fetcher falso)
 
-healthz; POST con `headers` → el Fetcher falso recibe la cabecera en cada
+healthz; el summary del crawl terminado coincide con las páginas servidas por el Fetcher falso aunque el rastreo termine antes de 1 s (el Close del BatchWriter vuelca lo pendiente antes de FinishCrawl); POST con `headers` → el Fetcher falso recibe la cabecera en cada
 petición (el `NewFetcher` inyectado recibe la `Config` con `Headers`) y el
 config almacenado la incluye; POST con cabecera inválida → 400; POST con `origin` e `insecure_tls` → el
 Fetcher inyectado recibe la Config con ambos y el config almacenado los
