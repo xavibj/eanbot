@@ -137,8 +137,8 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      → «la petición ha fallado». Al crear, navega a `#/crawls/{id}`.
   3. **Detalle de rastreo** (`#/crawls/{id}`): cabecera (semilla, estado,
      botón cancelar si running), tarjetas de resumen (total, 2xx, 3xx, 4xx,
-     5xx, errores, bloqueadas, noindex), pestañas «Páginas» y «Enlaces
-     rotos». Páginas: filtro por estado (select), búsqueda (input con
+     5xx, errores, bloqueadas, noindex), pestañas «Páginas», «Enlaces rotos» e «Informe» (esta última según
+     `specs/008-informe.md`). Páginas: filtro por estado (select), búsqueda (input con
      debounce 300 ms), tabla (código, URL, título, tipo, profundidad, ms) con
      paginación (100 por página); clic en fila → `#/crawls/{id}/pages/{pid}`.
      Enlaces rotos: tabla paginada (100 por página, misma paginación que

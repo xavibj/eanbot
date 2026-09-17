@@ -10,6 +10,7 @@ por dependencias. `go.mod`/`go.sum` no se tocan (ya fijados por el orquestador).
 | B server | `server/**` (Go) + `server/static/index.html` placeholder | A1, A2 | 004 |
 | C1 cli | `cmd/eanbot/**` | B | 005 |
 | C2 web | `web/**` y la salida `server/static/**` (build) | B | 004 (frontend) |
+| E informe | `report/**`, `store/**`, `server/**` (Go), `cmd/eanbot/**` ∥ `web/**` | C1, C2 | 008 |
 | D verificación | orquestador: binario real, rastreo de xavibolivar.xavi.net, curl, navegador | C1, C2 | 000 |
 
 A1 y A2 en paralelo; C1 y C2 en paralelo.
