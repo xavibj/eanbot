@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1511,5 +1512,217 @@ func TestEnsureSQLiteTempDir(t *testing.T) {
 				t.Fatalf("SQLITE_TMPDIR = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- ForEachPage / BrokenReferrerCounts (spec 008) ---
+
+// seedStreamCrawl creates a crawl with pages of every kind ForEachPage and
+// BrokenReferrerCounts care about: healthy pages, 4xx/5xx and fetch errors
+// (broken), and a robots-blocked page (not broken). Each broken page gets a
+// distinct number of referrers.
+func seedStreamCrawl(t *testing.T, s *Store) int64 {
+	t.Helper()
+	c := mustCreateCrawl(t, s, "https://example.com/")
+
+	pages := []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, ContentType: "text/html", FetchedAt: time.Now()},
+			Links: []Link{
+				{ToURL: "https://example.com/gone", InScope: true},
+				{ToURL: "https://example.com/boom", InScope: true},
+				{ToURL: "https://example.com/dead", InScope: true},
+			}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/a", Depth: 1, Status: 200, ContentType: "text/html", FetchedAt: time.Now()},
+			Links: []Link{
+				{ToURL: "https://example.com/gone", InScope: true},
+				{ToURL: "https://example.com/boom", InScope: true},
+			}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/b", Depth: 1, Status: 200, ContentType: "text/html", FetchedAt: time.Now()},
+			Links: []Link{{ToURL: "https://example.com/gone", InScope: true}}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/gone", Depth: 2, Status: 404, FetchedAt: time.Now()}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/boom", Depth: 2, Status: 500, FetchedAt: time.Now()}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/dead", Depth: 2, Status: 0, Error: "dial tcp: no such host", FetchedAt: time.Now()}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/blocked", Depth: 2, Status: 0, Blocked: true, FetchedAt: time.Now()}},
+	}
+	if _, err := s.AddPages(c.ID, pages); err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+	return c.ID
+}
+
+func TestForEachPage_OrderAndAllFields(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedStreamCrawl(t, s)
+
+	var (
+		urls []string
+		ids  []int64
+	)
+	if err := s.ForEachPage(context.Background(), crawlID, func(p Page) error {
+		urls = append(urls, p.URL)
+		ids = append(ids, p.ID)
+		if p.URL == "https://example.com/blocked" && !p.Blocked {
+			t.Errorf("blocked page scanned with Blocked = false")
+		}
+		if p.URL == "https://example.com/dead" && p.Error == "" {
+			t.Errorf("errored page scanned with empty Error")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEachPage() error = %v", err)
+	}
+
+	want := []string{
+		"https://example.com/", "https://example.com/a", "https://example.com/b",
+		"https://example.com/gone", "https://example.com/boom", "https://example.com/dead",
+		"https://example.com/blocked",
+	}
+	if len(urls) != len(want) {
+		t.Fatalf("ForEachPage() visited %d pages, want %d", len(urls), len(want))
+	}
+	for i := range want {
+		if urls[i] != want[i] {
+			t.Fatalf("page %d = %q, want %q (expected id order)", i, urls[i], want[i])
+		}
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("ids not ascending: %v", ids)
+		}
+	}
+}
+
+func TestForEachPage_StopsOnCallbackError(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedStreamCrawl(t, s)
+
+	sentinel := errors.New("basta")
+	n := 0
+	err := s.ForEachPage(context.Background(), crawlID, func(Page) error {
+		n++
+		if n == 3 {
+			return sentinel
+		}
+		return nil
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ForEachPage() error = %v, want %v", err, sentinel)
+	}
+	if n != 3 {
+		t.Fatalf("callback called %d times, want 3", n)
+	}
+}
+
+func TestForEachPage_ContextCancelled(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedStreamCrawl(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := 0
+	err := s.ForEachPage(ctx, crawlID, func(Page) error {
+		n++
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ForEachPage() error = %v, want context.Canceled", err)
+	}
+	if n > 2 {
+		t.Fatalf("callback called %d times after cancel, want at most 2", n)
+	}
+}
+
+func TestForEachPage_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	err := s.ForEachPage(context.Background(), 999, func(Page) error { return nil })
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ForEachPage() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestForEachPage_EmptyCrawl(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://empty.example/")
+	n := 0
+	if err := s.ForEachPage(context.Background(), c.ID, func(Page) error { n++; return nil }); err != nil {
+		t.Fatalf("ForEachPage() error = %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("callback called %d times on an empty crawl", n)
+	}
+}
+
+func TestBrokenReferrerCounts(t *testing.T) {
+	s := openTestStore(t)
+	crawlID := seedStreamCrawl(t, s)
+
+	got, total, err := s.BrokenReferrerCounts(crawlID, 5000)
+	if err != nil {
+		t.Fatalf("BrokenReferrerCounts() error = %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	want := []struct {
+		url  string
+		refs int
+	}{
+		{"https://example.com/boom", 2},
+		{"https://example.com/dead", 1},
+		{"https://example.com/gone", 3},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d broken pages, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Page.URL != w.url {
+			t.Fatalf("broken[%d].URL = %q, want %q (ordered by url)", i, got[i].Page.URL, w.url)
+		}
+		if got[i].ReferrersCount != w.refs {
+			t.Fatalf("broken[%d] (%s) referrers = %d, want %d", i, w.url, got[i].ReferrersCount, w.refs)
+		}
+	}
+}
+
+func TestBrokenReferrerCounts_LimitAboveBrokenLinksCap(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://big.example/")
+
+	const n = 1200
+	batch := make([]PageWithLinks, 0, n)
+	for i := 0; i < n; i++ {
+		batch = append(batch, PageWithLinks{Page: Page{
+			CrawlID: c.ID, URL: fmt.Sprintf("https://big.example/p%04d", i),
+			Status: 404, FetchedAt: time.Now(),
+		}})
+	}
+	if _, err := s.AddPages(c.ID, batch); err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+
+	got, total, err := s.BrokenReferrerCounts(c.ID, 5000)
+	if err != nil {
+		t.Fatalf("BrokenReferrerCounts() error = %v", err)
+	}
+	if total != n {
+		t.Fatalf("total = %d, want %d", total, n)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d broken pages, want %d (limit must not be capped at BrokenLinks' 1000)", len(got), n)
+	}
+
+	limited, total, err := s.BrokenReferrerCounts(c.ID, 10)
+	if err != nil {
+		t.Fatalf("BrokenReferrerCounts() error = %v", err)
+	}
+	if len(limited) != 10 || total != n {
+		t.Fatalf("limited: got %d pages, total %d; want 10 and %d", len(limited), total, n)
+	}
+}
+
+func TestBrokenReferrerCounts_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	if _, _, err := s.BrokenReferrerCounts(999, 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("BrokenReferrerCounts() error = %v, want ErrNotFound", err)
 	}
 }

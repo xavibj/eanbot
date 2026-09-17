@@ -72,6 +72,28 @@ const brokenLinksWhere = "crawl_id = ? AND (status >= 400 OR (status = 0 AND blo
 // as a page's Inlinks via GetPage). It returns ErrNotFound if the crawl
 // does not exist. limit defaults to 100 and is capped at 1000.
 func (s *Store) BrokenLinks(crawlID int64, limit, offset int) ([]BrokenPage, int, error) {
+	return s.brokenPages(crawlID, clampLimit(limit), offset)
+}
+
+// BrokenReferrerCounts returns up to limit broken pages of a crawl (ordered
+// by URL) with their referrer counts, plus the total number of broken
+// pages. It is BrokenLinks' query without the pagination cap: the aggregate
+// report of specs/008-informe.md ranks the most-linked-to broken pages over
+// a window of several thousand of them (far above BrokenLinks' 1000-row
+// page limit, which exists to bound an API response, not this one-shot
+// in-process scan) and reports how many it looked at.
+func (s *Store) BrokenReferrerCounts(crawlID int64, limit int) ([]BrokenPage, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.brokenPages(crawlID, limit, 0)
+}
+
+// brokenPages is the shared implementation of BrokenLinks and
+// BrokenReferrerCounts: one page of broken pages ordered by URL, each with
+// its referrer count, plus the total number of broken pages in the crawl.
+// limit is used as given (callers decide their own cap).
+func (s *Store) brokenPages(crawlID int64, limit, offset int) ([]BrokenPage, int, error) {
 	exists, err := s.crawlExists(crawlID)
 	if err != nil {
 		return nil, 0, err
@@ -80,7 +102,6 @@ func (s *Store) BrokenLinks(crawlID int64, limit, offset int) ([]BrokenPage, int
 		return nil, 0, ErrNotFound
 	}
 
-	limit = clampLimit(limit)
 	if offset < 0 {
 		offset = 0
 	}
@@ -106,7 +127,13 @@ func (s *Store) BrokenLinks(crawlID int64, limit, offset int) ([]BrokenPage, int
 	}
 	defer rows.Close()
 
-	out := make([]BrokenPage, 0, limit)
+	// Cap the pre-allocation: limit can be several thousand (see
+	// BrokenReferrerCounts) while most crawls have far fewer broken pages.
+	capacity := limit
+	if capacity > 1000 {
+		capacity = 1000
+	}
+	out := make([]BrokenPage, 0, capacity)
 	for rows.Next() {
 		var (
 			p          Page

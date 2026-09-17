@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"xavi.net/eanbot/crawler"
+	"xavi.net/eanbot/report"
 	"xavi.net/eanbot/store"
 )
 
@@ -1063,5 +1064,131 @@ func TestDeleteCrawl_CancelsRunning(t *testing.T) {
 	wg := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d", crawl.ID), nil)
 	if wg.Code != http.StatusNotFound {
 		t.Errorf("get after delete status = %d, want 404", wg.Code)
+	}
+}
+
+// --- GET /api/crawls/{id}/report (spec 008) ---
+
+type reportBody struct {
+	Report report.Report `json:"report"`
+}
+
+func TestReport_JSON(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/report", id), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != "" {
+		t.Errorf("Content-Disposition = %q, want none without download=1", cd)
+	}
+
+	body := decodeJSON[reportBody](t, w)
+	r := body.Report
+	if r.Crawl.ID != id {
+		t.Errorf("report.crawl.id = %d, want %d", r.Crawl.ID, id)
+	}
+	if r.Summary.Total != 4 {
+		t.Errorf("report.summary.total = %d, want 4", r.Summary.Total)
+	}
+	if len(r.ByDepth) == 0 || len(r.ByStatus) == 0 {
+		t.Errorf("report has empty breakdowns: %+v", r)
+	}
+	if r.TopBrokenScanned != 1 || len(r.TopBroken) != 1 {
+		t.Errorf("top_broken = %+v (scanned %d), want the single 404", r.TopBroken, r.TopBrokenScanned)
+	}
+	if r.GeneratedAt.IsZero() {
+		t.Errorf("generated_at is zero")
+	}
+}
+
+func TestReport_ExplicitJSONFormat(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/report?format=json", id), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if body := decodeJSON[reportBody](t, w); body.Report.Crawl.ID != id {
+		t.Errorf("report.crawl.id = %d, want %d", body.Report.Crawl.ID, id)
+	}
+}
+
+func TestReport_Markdown(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/report?format=md", id), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/markdown; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/markdown; charset=utf-8", ct)
+	}
+	md := w.Body.String()
+	if !strings.HasPrefix(md, fmt.Sprintf("# Informe del rastreo #%d — ", id)) {
+		t.Errorf("markdown does not start with the report title:\n%s", md[:min(len(md), 120)])
+	}
+	if !strings.Contains(md, "\n## Códigos\n") {
+		t.Errorf("markdown has no ## Códigos section")
+	}
+}
+
+func TestReport_Download(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	tests := []struct {
+		format   string
+		wantDisp string
+	}{
+		{"md", fmt.Sprintf(`attachment; filename="eanbot-rastreo-%d.md"`, id)},
+		{"json", fmt.Sprintf(`attachment; filename="eanbot-rastreo-%d.json"`, id)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.format, func(t *testing.T) {
+			w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/report?format=%s&download=1", id, tc.format), nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Content-Disposition"); got != tc.wantDisp {
+				t.Errorf("Content-Disposition = %q, want %q", got, tc.wantDisp)
+			}
+		})
+	}
+}
+
+func TestReport_InvalidFormat(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/report?format=pdf", id), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	body := decodeJSON[errorsBody](t, w)
+	if len(body.Errors) != 1 || body.Errors[0] != "format no válido" {
+		t.Errorf("errors = %v, want [\"format no válido\"]", body.Errors)
+	}
+}
+
+func TestReport_NotFound(t *testing.T) {
+	_, h := newTestServer(t, newFakeFetcher())
+
+	for _, path := range []string{"/api/crawls/999/report", "/api/crawls/abc/report"} {
+		w := doRequest(h, http.MethodGet, path, nil)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404", path, w.Code)
+		}
+	}
+}
+
+func TestReport_MethodNotAllowed(t *testing.T) {
+	h, id := setupFilterCrawl(t)
+
+	w := doRequest(h, http.MethodPost, fmt.Sprintf("/api/crawls/%d/report", id), nil)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
 	}
 }

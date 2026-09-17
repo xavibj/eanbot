@@ -1,11 +1,12 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { cancelCrawl, errorsOf, getCrawl, listBroken, listPages } from '../api.js'
+import { cancelCrawl, errorsOf, getCrawl, getReport, listBroken, listPages } from '../api.js'
 import { crawlDuration, formatDateTime, formatMillis, formatNumber, orDash } from '../format.js'
 import { navigate, pageHref } from '../router.js'
 import CrawlBadge from '../components/CrawlBadge.vue'
 import ErrorList from '../components/ErrorList.vue'
 import Pagination from '../components/Pagination.vue'
+import ReportView from '../components/ReportView.vue'
 import StatusCode from '../components/StatusCode.vue'
 import SummaryCards from '../components/SummaryCards.vue'
 
@@ -50,6 +51,10 @@ const brokenLimit = ref(PAGE_SIZE)
 const brokenLoaded = ref(false)
 const brokenLoading = ref(false)
 const brokenErrors = ref([])
+
+const report = ref(null)
+const reportLoading = ref(false)
+const reportErrors = ref([])
 
 let stopped = false
 let timer = null
@@ -102,7 +107,8 @@ function schedule() {
     await loadHead(true)
     if (stopped) return
     if (tab.value === 'pages') await loadPages(true)
-    else await loadBroken(true)
+    else if (tab.value === 'broken') await loadBroken(true)
+    // the report tab is generated on demand only, never by the 2 s refresh
   }, 2000)
 }
 
@@ -242,6 +248,25 @@ function nextPage() {
   loadPages()
 }
 
+// The report is generated only when the user asks for it: switching tabs or
+// coming back to an already generated report never re-runs it.
+async function generateReport() {
+  if (reportLoading.value) return
+  reportLoading.value = true
+  reportErrors.value = []
+  try {
+    const data = await getReport(props.crawlId)
+    if (stopped) return
+    report.value = data.report || null
+    if (!report.value) reportErrors.value = ['la petición ha fallado']
+  } catch (err) {
+    if (stopped) return
+    reportErrors.value = errorsOf(err)
+  } finally {
+    if (!stopped) reportLoading.value = false
+  }
+}
+
 function selectTab(name) {
   if (tab.value === name) return
   tab.value = name
@@ -353,6 +378,14 @@ onBeforeUnmount(() => {
           @click="selectTab('broken')"
         >
           Enlaces rotos
+        </button>
+        <button
+          type="button"
+          class="tab"
+          :class="tab === 'report' ? 'is-active' : ''"
+          @click="selectTab('report')"
+        >
+          Informe
         </button>
       </div>
 
@@ -487,6 +520,52 @@ onBeforeUnmount(() => {
         />
       </div>
 
+      <div v-show="tab === 'report'">
+        <ErrorList :errors="reportErrors" />
+
+        <div v-if="!report && !reportLoading" class="card">
+          <p class="muted" style="margin: 0 0 12px">
+            El informe agrega códigos, profundidades, idiomas, secciones,
+            redirecciones, errores y muestras de este rastreo. Se genera bajo
+            demanda.
+          </p>
+          <div class="btn-row">
+            <button
+              type="button"
+              class="btn btn-primary"
+              :disabled="isRunning || reportLoading"
+              @click="generateReport"
+            >
+              Generar informe
+            </button>
+            <button
+              v-if="isRunning"
+              type="button"
+              class="btn"
+              :disabled="reportLoading"
+              @click="generateReport"
+            >
+              Generar igualmente
+            </button>
+          </div>
+          <p v-if="isRunning" class="small muted" style="margin: 10px 0 0">
+            Disponible al terminar: el rastreo sigue en marcha y el informe sería parcial.
+          </p>
+        </div>
+
+        <p v-if="reportLoading" class="loading">
+          Generando informe, puede tardar unos segundos…
+        </p>
+
+        <template v-if="report && !reportLoading">
+          <ReportView :report="report" :crawl-id="crawlId" />
+          <div class="btn-row" style="margin-top: 16px">
+            <button type="button" class="btn btn-sm" @click="generateReport">
+              Regenerar
+            </button>
+          </div>
+        </template>
+      </div>
     </template>
 
     <div v-else-if="!headErrors.length" class="card empty">No se ha encontrado el rastreo.</div>

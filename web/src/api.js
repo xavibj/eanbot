@@ -97,6 +97,16 @@ export function listBroken(id, { limit, offset } = {}) {
   return get(`/api/crawls/${encodeURIComponent(id)}/broken${query({ limit, offset })}`)
 }
 
+export function getReport(id) {
+  return get(`/api/crawls/${encodeURIComponent(id)}/report`)
+}
+
+// reportDownloadUrl builds the href for the Markdown/JSON download links.
+export function reportDownloadUrl(id, format) {
+  const fmt = format === 'json' ? 'json' : 'md'
+  return `/api/crawls/${encodeURIComponent(id)}/report?format=${fmt}&download=1`
+}
+
 // errorsOf turns anything thrown by the calls above into a list of strings.
 export function errorsOf(err) {
   if (err && Array.isArray(err.errors) && err.errors.length) return err.errors.map(String)

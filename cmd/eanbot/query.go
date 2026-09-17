@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
+	"xavi.net/eanbot/report"
 	"xavi.net/eanbot/store"
 )
 
@@ -223,7 +226,7 @@ func collectBrokenPages(st *store.Store, crawlID int64, referrersPerPage int) ([
 }
 
 // shiftCrawlID extracts the leading positional <crawl-id> argument shared by
-// "pages" and "broken", returning the remaining args to feed the FlagSet.
+// "pages", "broken" and "report", returning the remaining args to feed the FlagSet.
 // A non-numeric id is reported as id == -1 (translated by the caller into
 // "rastreo no encontrado", exit 1) rather than a flag-parsing error, per
 // specs/005-cli.md.
@@ -239,7 +242,8 @@ func shiftCrawlID(args []string, stderr io.Writer) (id int64, rest []string, cod
 	return id, args[1:], 0
 }
 
-// reportCrawlLookupError turns a store error from GetCrawl/BrokenLinks into
+// reportCrawlLookupError turns a store error from GetCrawl/BrokenLinks/
+// report.Build into
 // the CLI's exit code and message: ErrNotFound is reported as "rastreo no
 // encontrado", anything else as a generic error.
 func reportCrawlLookupError(stderr io.Writer, err error) int {
@@ -284,5 +288,70 @@ func flushTabwriter(tw *tabwriter.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+// cmdReport implements "eanbot report <crawl-id> [flags]" (spec 008): the
+// aggregate report of a crawl, as Markdown (default) or JSON, to stdout or
+// to a file.
+func cmdReport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("report", stderr)
+	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
+	jsonOutput := fs.Bool("json", false, "imprimir el informe en JSON en lugar de Markdown")
+	outPath := fs.String("o", "", "escribir el informe en un fichero en lugar de stdout")
+
+	crawlID, args, code := shiftCrawlID(args, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "error: argumentos no reconocidos: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if crawlID < 0 {
+		fmt.Fprintln(stderr, "error: rastreo no encontrado")
+		return 1
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	rep, err := report.Build(ctx, st, crawlID)
+	if err != nil {
+		return reportCrawlLookupError(stderr, err)
+	}
+
+	var body []byte
+	if *jsonOutput {
+		body, err = json.Marshal(rep)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		body = append(body, '\n')
+	} else {
+		body = []byte(report.Markdown(rep))
+	}
+
+	if *outPath == "" {
+		if _, err := stdout.Write(body); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	if err := os.WriteFile(*outPath, body, 0o644); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "informe escrito en %s\n", *outPath)
 	return 0
 }

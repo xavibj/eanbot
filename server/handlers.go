@@ -3,10 +3,13 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
 
+	"xavi.net/eanbot/report"
 	"xavi.net/eanbot/store"
 )
 
@@ -263,4 +266,47 @@ func (s *Server) handleBroken(w http.ResponseWriter, r *http.Request, id int64) 
 		"limit":  limit,
 		"offset": offset,
 	})
+}
+
+// handleReport serves the aggregate report of a crawl (specs/008-informe.md)
+// as JSON or Markdown. The report is always computed on demand -- it is
+// never cached, and never produced by polling -- so it uses r.Context():
+// if the client goes away mid-scan, the pass over the crawl's pages stops
+// with it instead of finishing a report nobody will read.
+func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, id int64) {
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "md" {
+		writeErrors(w, http.StatusBadRequest, []string{"format no válido"})
+		return
+	}
+
+	rep, err := report.Build(r.Context(), s.st, id)
+	if errors.Is(err, store.ErrNotFound) {
+		s.notFound(w)
+		return
+	}
+	if err != nil {
+		if r.Context().Err() != nil {
+			// The client hung up mid-report: nothing left to answer to.
+			return
+		}
+		s.internalError(w, err)
+		return
+	}
+
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="eanbot-rastreo-%d.%s"`, id, format))
+	}
+
+	if format == "md" {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, report.Markdown(rep))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"report": rep})
 }

@@ -24,6 +24,7 @@ const usageText = `Uso:
   eanbot crawls      [-db eanbot.db] [-json]
   eanbot pages <crawl-id> [-db eanbot.db] [-status 2xx|3xx|4xx|5xx|error|blocked] [-q texto] [-json]
   eanbot broken <crawl-id> [-db eanbot.db] [-json]
+  eanbot report <crawl-id> [-db eanbot.db] [-json] [-o fichero]
   eanbot version
   eanbot help | -h | --help
 `
@@ -65,6 +66,8 @@ func runCtx(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdPages(rest, stdout, stderr)
 	case "broken":
 		return cmdBroken(rest, stdout, stderr)
+	case "report":
+		return cmdReport(ctx, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: comando desconocido: %s\n\n", cmd)
 		fmt.Fprint(stderr, usageText)

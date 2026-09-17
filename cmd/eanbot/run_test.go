@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"xavi.net/eanbot/report"
 	"xavi.net/eanbot/store"
 )
 
@@ -748,5 +750,188 @@ func TestServeError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "bind: address already in use") {
 		t.Errorf("stderr = %q, want the listenAndServe error", stderr.String())
+	}
+}
+
+// --- report (spec 008) ---
+
+// seedReportDB writes a small finished crawl straight to a fresh database
+// and returns its path and crawl id.
+func seedReportDB(t *testing.T) (string, int64) {
+	t.Helper()
+	dbPath := tempDBPath(t)
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	crawl, err := st.CreateCrawl("https://informe.example/", json.RawMessage(`{"seed":"https://informe.example/","max_pages":10}`))
+	if err != nil {
+		t.Fatalf("CreateCrawl() error = %v", err)
+	}
+	now := time.Now().UTC()
+	pages := []store.PageWithLinks{
+		{Page: store.Page{CrawlID: crawl.ID, URL: "https://informe.example/", Status: 200, ContentType: "text/html",
+			Title: "Inicio", DurationMs: 40, Size: 1200, FetchedAt: now},
+			Links: []store.Link{{ToURL: "https://informe.example/roto", InScope: true}}},
+		{Page: store.Page{CrawlID: crawl.ID, URL: "https://informe.example/es/vieja", Depth: 1, Status: 301,
+			RedirectTo: "https://informe.example/es/vieja/", DurationMs: 10, FetchedAt: now}},
+		{Page: store.Page{CrawlID: crawl.ID, URL: "https://informe.example/roto", Depth: 1, Status: 404,
+			DurationMs: 15, FetchedAt: now}},
+	}
+	if _, err := st.AddPages(crawl.ID, pages); err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+	if err := st.FinishCrawl(crawl.ID, "done", ""); err != nil {
+		t.Fatalf("FinishCrawl() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return dbPath, crawl.ID
+}
+
+func TestCmdReport_Markdown(t *testing.T) {
+	dbPath, id := seedReportDB(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{"report", strconv.FormatInt(id, 10), "-db", dbPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.HasPrefix(out, fmt.Sprintf("# Informe del rastreo #%d — https://informe.example/", id)) {
+		t.Errorf("stdout does not start with the report title:\n%s", out)
+	}
+	for _, heading := range []string{"## Códigos", "## Redirecciones", "## Páginas rotas con más referrers", "## Muestras"} {
+		if !strings.Contains(out, heading) {
+			t.Errorf("stdout has no %q section", heading)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestCmdReport_JSON(t *testing.T) {
+	dbPath, id := seedReportDB(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{"report", strconv.FormatInt(id, 10), "-db", dbPath, "-json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	var rep report.Report
+	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error = %v", stdout.String(), err)
+	}
+	if rep.Crawl.ID != id {
+		t.Errorf("crawl.id = %d, want %d", rep.Crawl.ID, id)
+	}
+	if rep.Summary.Total != 3 {
+		t.Errorf("summary.total = %d, want 3", rep.Summary.Total)
+	}
+	if len(rep.Redirects) != 1 || rep.Redirects[0].Pattern != "añade barra final" {
+		t.Errorf("redirects = %+v, want a single trailing-slash pattern", rep.Redirects)
+	}
+	if len(rep.TopBroken) != 1 || rep.TopBroken[0].Referrers != 1 {
+		t.Errorf("top_broken = %+v, want the 404 with one referrer", rep.TopBroken)
+	}
+}
+
+func TestCmdReport_OutputFile(t *testing.T) {
+	dbPath, id := seedReportDB(t)
+	out := filepath.Join(t.TempDir(), "informe.md")
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"report", strconv.FormatInt(id, 10), "-db", dbPath, "-o", out,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing when writing to a file", stdout.String())
+	}
+	if want := "informe escrito en " + out; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), "## Códigos") {
+		t.Errorf("written file is not the Markdown report:\n%s", data)
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("file mode = %v, want 0644", info.Mode().Perm())
+	}
+}
+
+func TestCmdReport_OutputFileJSON(t *testing.T) {
+	dbPath, id := seedReportDB(t)
+	out := filepath.Join(t.TempDir(), "informe.json")
+
+	var stdout, stderr bytes.Buffer
+	code := runCtx(context.Background(), []string{
+		"report", strconv.FormatInt(id, 10), "-db", dbPath, "-json", "-o", out,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var rep report.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("written file is not valid JSON: %v", err)
+	}
+	if rep.Crawl.ID != id {
+		t.Errorf("crawl.id = %d, want %d", rep.Crawl.ID, id)
+	}
+}
+
+func TestCmdReport_NotFound(t *testing.T) {
+	dbPath, _ := seedReportDB(t)
+
+	tests := []struct{ name, id string }{
+		{"id inexistente", "999"},
+		{"id no numérico", "abc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCtx(context.Background(), []string{"report", tc.id, "-db", dbPath}, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1", code)
+			}
+			if !strings.Contains(stderr.String(), "error: rastreo no encontrado") {
+				t.Errorf("stderr = %q, want \"error: rastreo no encontrado\"", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdReport_MissingID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCtx(context.Background(), []string{"report"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+}
+
+func TestUsage_MentionsReport(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCtx(context.Background(), []string{"help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "eanbot report <crawl-id>") {
+		t.Errorf("usage does not document the report subcommand:\n%s", stdout.String())
 	}
 }

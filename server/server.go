@@ -97,6 +97,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/crawls/{id}/broken", methodHandler(map[string]http.HandlerFunc{
 		http.MethodGet: s.wrapID(s.handleBroken),
 	}))
+	mux.HandleFunc("/api/crawls/{id}/report", methodHandler(map[string]http.HandlerFunc{
+		http.MethodGet: s.wrapID(s.handleReport),
+	}))
 	// Any other /api/ path: JSON 404 (more specific patterns above win).
 	mux.HandleFunc("/api/", s.handleAPIFallback)
 

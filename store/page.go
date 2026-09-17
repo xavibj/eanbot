@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -424,4 +425,57 @@ func scanPage(row rowScanner) (*Page, error) {
 	}
 	p.FetchedAt = t
 	return &p, nil
+}
+
+// ForEachPage calls fn for every page of a crawl, ordered by id, streaming
+// the rows rather than materializing them: the aggregate report of
+// specs/008-informe.md walks a crawl of a million pages in a single pass
+// and must keep its memory bounded, so ListPages (which paginates and
+// counts) is the wrong tool here.
+//
+// It stops early and returns the error if fn returns one, or ctx.Err() if
+// ctx is cancelled (checked once per row, so a cancelled request abandons
+// the scan promptly instead of draining the whole table). It returns
+// ErrNotFound if the crawl does not exist, which is what tells an empty
+// crawl apart from a missing one.
+func (s *Store) ForEachPage(ctx context.Context, crawlID int64, fn func(Page) error) error {
+	exists, err := s.crawlExists(crawlID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
+			title, description, canonical, meta_robots, noindex, nofollow,
+			h1, redirect_to, error, blocked, fetched_at
+		 FROM pages WHERE crawl_id = ? ORDER BY id`,
+		crawlID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: stream pages of crawl %d: %w", crawlID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p, err := scanPage(rows)
+		if err != nil {
+			return fmt.Errorf("store: stream pages of crawl %d: %w", crawlID, err)
+		}
+		if err := fn(*p); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("store: stream pages of crawl %d: %w", crawlID, err)
+	}
+	return nil
 }
