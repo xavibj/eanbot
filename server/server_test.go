@@ -258,6 +258,71 @@ func TestPostCrawl_ValidRunsToCompletion(t *testing.T) {
 	}
 }
 
+// TestPostCrawl_SummaryCorrectWhenCrawlFinishesUnderABatchSecond checks the
+// summary of a finished crawl matches every page the fake Fetcher served
+// even though the whole crawl (a handful of pages against an in-memory
+// Fetcher, no delay) finishes in well under BatchWriter's 1s maxDelay. Per
+// specs/004-api-web.md, this only works because manager.run's Close() on
+// the BatchWriter flushes whatever is still buffered before FinishCrawl
+// runs -- without it, a crawl that never reaches 100 buffered pages would
+// have its last (fewer than 100) pages missing from the summary until the
+// 1s timer happened to fire, which for a sub-second crawl is never.
+func TestPostCrawl_SummaryCorrectWhenCrawlFinishesUnderABatchSecond(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://fast.example/", htmlResponse(`<html><body>
+		<a href="/a">A</a>
+		<a href="/b">B</a>
+	</body></html>`))
+	f.set("https://fast.example/a", htmlResponse(`<html><body>ok</body></html>`))
+	f.set("https://fast.example/b", statusResponse(404))
+
+	_, h := newTestServer(t, f)
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":          "https://fast.example/",
+		"delay_ms":      0,
+		"concurrency":   1,
+		"max_pages":     10,
+		"ignore_robots": true,
+		"use_sitemaps":  false,
+	})
+	start := time.Now()
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+
+	// A generous 5s timeout for waitUntilDone's own polling, but the crawl
+	// itself (three in-memory fetches, no delay) must finish in well under
+	// BatchWriter's 1s maxDelay for this test to actually exercise Close's
+	// flush-on-finish rather than the timer.
+	detail := waitUntilDone(t, h, crawl.ID, 5*time.Second)
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("crawl took %s, want under 1s (BatchWriter's maxDelay) for this test to be meaningful", elapsed)
+	}
+	if detail.Crawl.Status != "done" {
+		t.Fatalf("final status = %q, want done (error=%q)", detail.Crawl.Status, detail.Crawl.Error)
+	}
+	if detail.Summary.Total != 3 {
+		t.Errorf("summary.total = %d, want 3", detail.Summary.Total)
+	}
+	if detail.Summary.Status2xx != 2 {
+		t.Errorf("summary.status_2xx = %d, want 2", detail.Summary.Status2xx)
+	}
+	if detail.Summary.Status4xx != 1 {
+		t.Errorf("summary.status_4xx = %d, want 1", detail.Summary.Status4xx)
+	}
+
+	pagesW := doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/pages", crawl.ID), nil)
+	pagesBody := decodeJSON[struct {
+		Total int `json:"total"`
+	}](t, pagesW)
+	if pagesBody.Total != 3 {
+		t.Errorf("pages total = %d, want 3", pagesBody.Total)
+	}
+}
+
 func TestPostCrawl_Defaults(t *testing.T) {
 	f := newFakeFetcher()
 	f.set("https://defaults.example/", statusResponse(200))

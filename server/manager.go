@@ -71,7 +71,16 @@ func (m *manager) Start(cfg crawler.Config) (int64, error) {
 	m.mu.Unlock()
 
 	fetcher := m.newFetcher(cfg)
-	sink := &storeSink{st: m.st, crawlID: crawl.ID, log: m.log}
+	// batchMaxItems/batchMaxDelay match specs/004-api-web.md's Manager
+	// contract (100 pages or 1s, whichever comes first): with a crawl of
+	// over a million pages, a commit per page grew the WAL far faster than
+	// checkpoints could reclaim it (see "Lotes" in specs/003-store.md).
+	sink := &storeSink{
+		st:      m.st,
+		crawlID: crawl.ID,
+		log:     m.log,
+		writer:  store.NewBatchWriter(m.st, crawl.ID, 100, time.Second),
+	}
 
 	m.wg.Add(1)
 	go m.run(ctx, cancel, crawl.ID, cfg, fetcher, sink)
@@ -79,13 +88,21 @@ func (m *manager) Start(cfg crawler.Config) (int64, error) {
 	return crawl.ID, nil
 }
 
-func (m *manager) run(ctx context.Context, cancel context.CancelFunc, crawlID int64, cfg crawler.Config, fetcher crawler.Fetcher, sink crawler.Sink) {
+func (m *manager) run(ctx context.Context, cancel context.CancelFunc, crawlID int64, cfg crawler.Config, fetcher crawler.Fetcher, sink *storeSink) {
 	defer m.wg.Done()
 	defer cancel()
 
 	m.log.Printf("crawl %d: started (seed=%s)", crawlID, cfg.Seed)
 
 	stats, err := crawler.Run(ctx, cfg, fetcher, sink)
+
+	// Close before FinishCrawl: it flushes whatever is still buffered, so
+	// the crawl is never marked done/failed/cancelled with pages still
+	// missing from the store (this matters most for crawls that finish in
+	// well under BatchWriter's 1s maxDelay).
+	if werr := sink.writer.Close(); werr != nil {
+		m.log.Printf("crawl %d: flush pages: %v", crawlID, werr)
+	}
 
 	if serr := m.st.SetRobots(crawlID, stats.RobotsTxt); serr != nil {
 		m.log.Printf("crawl %d: set robots: %v", crawlID, serr)
@@ -169,14 +186,17 @@ func (m *manager) shutdown(ctx context.Context) error {
 
 // --- crawler.Sink implementation: persists every page via store ---
 
-// storeSink adapts crawler.Sink to store.AddPage, converting types as it
-// goes. A page that fails to persist (e.g. a duplicate URL, which should
-// not happen given the frontier's own deduplication) is logged and
-// skipped rather than aborting the crawl.
+// storeSink adapts crawler.Sink to store.BatchWriter, converting types as
+// it goes. Page queues into writer rather than writing synchronously (see
+// "Lotes" in specs/003-store.md); a page that ultimately fails to persist
+// (e.g. a duplicate URL, which should not happen given the frontier's own
+// deduplication) is not reported per-page -- the batch's error is logged
+// once, in manager.run, after writer.Close().
 type storeSink struct {
 	st      *store.Store
 	crawlID int64
 	log     *log.Logger
+	writer  *store.BatchWriter
 }
 
 func (sk *storeSink) Page(p crawler.Page) {
@@ -211,9 +231,7 @@ func (sk *storeSink) Page(p crawler.Page) {
 		})
 	}
 
-	if _, err := sk.st.AddPage(sp, links); err != nil {
-		sk.log.Printf("crawl %d: add page %q: %v", sk.crawlID, p.URL, err)
-	}
+	sk.writer.Add(sp, links)
 }
 
 // --- config <-> JSON ---

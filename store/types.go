@@ -97,3 +97,11 @@ type BrokenPage struct {
 	Page           Page `json:"page"`
 	ReferrersCount int  `json:"referrers_count"`
 }
+
+// PageWithLinks pairs a Page with its outgoing links, as batched by
+// AddPages and BatchWriter (see specs/003-store.md, "Contadores, lotes y
+// checkpoints").
+type PageWithLinks struct {
+	Page  Page
+	Links []Link
+}

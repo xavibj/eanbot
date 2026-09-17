@@ -9,9 +9,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"xavi.net/eanbot/crawler"
 	"xavi.net/eanbot/store"
+)
+
+// crawlBatchMaxItems/crawlBatchMaxDelay match specs/005-cli.md's crawl
+// contract (100 pages / 1s, same as the server's Manager): with a crawl of
+// over a million pages, a commit per page grew the WAL far faster than
+// checkpoints could reclaim it (see "Lotes" in specs/003-store.md).
+const (
+	crawlBatchMaxItems = 100
+	crawlBatchMaxDelay = time.Second
 )
 
 // cmdCrawl implements "eanbot crawl <url> [flags]": it opens the store,
@@ -113,9 +123,21 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			fetcher.OriginHost = u.Hostname()
 		}
 	}
-	sink := &progressSink{st: st, crawlID: crawl.ID, stderr: stderr, quiet: *quiet}
+	sink := &progressSink{
+		crawlID: crawl.ID,
+		stderr:  stderr,
+		quiet:   *quiet,
+		writer:  store.NewBatchWriter(st, crawl.ID, crawlBatchMaxItems, crawlBatchMaxDelay),
+	}
 
 	stats, runErr := crawler.Run(ctx, cfg, fetcher, sink)
+
+	// Close before FinishCrawl (also on Ctrl-C cancellation, since this runs
+	// regardless of how crawler.Run returned): it flushes whatever is still
+	// buffered, so the crawl is never finished with pages still missing.
+	if werr := sink.writer.Close(); werr != nil {
+		fmt.Fprintf(stderr, "error: guardando páginas: %v\n", werr)
+	}
 
 	if serr := st.SetRobots(crawl.ID, stats.RobotsTxt); serr != nil {
 		fmt.Fprintf(stderr, "error: guardando robots.txt: %v\n", serr)
@@ -168,17 +190,21 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 }
 
-// progressSink adapts crawler.Sink to store.AddPage, converting types as it
-// goes (the same conversion server/manager.go does, duplicated here since
-// it is unexported there and cmd/eanbot must not modify server/). A page
-// that fails to persist is logged and skipped rather than aborting the
-// crawl. Unless quiet, it also writes one progress line per page to stderr.
+// progressSink adapts crawler.Sink to store.BatchWriter, converting types
+// as it goes (the same conversion server/manager.go does, duplicated here
+// since it is unexported there and cmd/eanbot must not modify server/).
+// Page queues into writer rather than writing synchronously (see "Lotes" in
+// specs/003-store.md); a page that ultimately fails to persist is not
+// reported per-page -- the batch's error is reported once, to stderr, after
+// writer.Close() in cmdCrawl. Unless quiet, it also writes one progress
+// line per page to stderr, independently of whether that page has actually
+// reached the store yet.
 type progressSink struct {
-	st      *store.Store
 	crawlID int64
 	stderr  io.Writer
 	quiet   bool
 	idx     int
+	writer  *store.BatchWriter
 }
 
 func (sk *progressSink) Page(p crawler.Page) {
@@ -215,9 +241,7 @@ func (sk *progressSink) Page(p crawler.Page) {
 		})
 	}
 
-	if _, err := sk.st.AddPage(sp, links); err != nil {
-		fmt.Fprintf(sk.stderr, "error: guardando página %q: %v\n", p.URL, err)
-	}
+	sk.writer.Add(sp, links)
 
 	if !sk.quiet {
 		line := fmt.Sprintf("[%4d] %-4s %-11s %s", sk.idx, crawlerPageCode(p), p.ContentType, p.URL)

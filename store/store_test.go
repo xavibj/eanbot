@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,6 +103,177 @@ func TestOpen_RunningCrawlBecomesFailed(t *testing.T) {
 	}
 	if got.FinishedAt == nil {
 		t.Errorf("FinishedAt = nil, want non-nil")
+	}
+}
+
+// TestOpen_MigratesOldSchema builds a database by hand using the schema as
+// it existed before specs/003-store.md's "Contadores, lotes y checkpoints"
+// (crawls without count_*/max_depth/duration_*/counters_ok, and no
+// crawl_content_types table at all), inserts a crawl and some pages
+// directly, then checks that Open upgrades it in place and Summarize
+// reports counters recomputed from those pages.
+func TestOpen_MigratesOldSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eanbot.db")
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	oldSchema := []string{
+		`CREATE TABLE crawls (
+			id          INTEGER PRIMARY KEY,
+			seed        TEXT NOT NULL,
+			status      TEXT NOT NULL,
+			config      TEXT NOT NULL,
+			started_at  TEXT NOT NULL,
+			finished_at TEXT,
+			pages_count INTEGER NOT NULL DEFAULT 0,
+			error       TEXT NOT NULL DEFAULT '',
+			robots_txt  TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE pages (
+			id           INTEGER PRIMARY KEY,
+			crawl_id     INTEGER NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+			url          TEXT NOT NULL,
+			depth        INTEGER NOT NULL,
+			status       INTEGER NOT NULL,
+			content_type TEXT NOT NULL DEFAULT '',
+			size         INTEGER NOT NULL DEFAULT 0,
+			duration_ms  INTEGER NOT NULL DEFAULT 0,
+			title        TEXT NOT NULL DEFAULT '',
+			description  TEXT NOT NULL DEFAULT '',
+			canonical    TEXT NOT NULL DEFAULT '',
+			meta_robots  TEXT NOT NULL DEFAULT '',
+			noindex      INTEGER NOT NULL DEFAULT 0,
+			nofollow     INTEGER NOT NULL DEFAULT 0,
+			h1           TEXT NOT NULL DEFAULT '',
+			redirect_to  TEXT NOT NULL DEFAULT '',
+			error        TEXT NOT NULL DEFAULT '',
+			blocked      INTEGER NOT NULL DEFAULT 0,
+			fetched_at   TEXT NOT NULL,
+			UNIQUE (crawl_id, url)
+		)`,
+		`CREATE TABLE links (
+			id           INTEGER PRIMARY KEY,
+			crawl_id     INTEGER NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+			from_page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+			to_url       TEXT NOT NULL,
+			text         TEXT NOT NULL DEFAULT '',
+			nofollow     INTEGER NOT NULL DEFAULT 0,
+			in_scope     INTEGER NOT NULL DEFAULT 0
+		)`,
+	}
+	for _, stmt := range oldSchema {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("create old schema: %v", err)
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// pages_count deliberately wrong (0): backfill must recompute it from
+	// pages, not trust whatever an old, possibly-stale value says.
+	res, err := raw.Exec(
+		`INSERT INTO crawls (seed, status, config, started_at, finished_at, pages_count) VALUES (?, 'done', '{}', ?, ?, 0)`,
+		"https://example.com", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert old crawl: %v", err)
+	}
+	crawlID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId() error = %v", err)
+	}
+
+	oldPages := []struct {
+		url         string
+		status      int
+		blocked     int
+		noindex     int
+		depth       int
+		contentType string
+		durationMs  int64
+	}{
+		{"https://example.com/", 200, 0, 0, 0, "text/html", 100},
+		{"https://example.com/a", 200, 0, 1, 1, "text/html", 200},
+		{"https://example.com/missing", 404, 0, 0, 2, "text/html", 10},
+		{"https://example.com/err", 0, 0, 0, 1, "", 0},
+		{"https://example.com/blocked", 0, 1, 0, 1, "", 0},
+	}
+	for _, p := range oldPages {
+		if _, err := raw.Exec(
+			`INSERT INTO pages (crawl_id, url, depth, status, content_type, duration_ms, blocked, noindex, fetched_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			crawlID, p.url, p.depth, p.status, p.contentType, p.durationMs, p.blocked, p.noindex, now,
+		); err != nil {
+			t.Fatalf("insert old page %s: %v", p.url, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() on old schema error = %v", err)
+	}
+	defer s.Close()
+
+	sum, err := s.Summarize(crawlID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Total != 5 {
+		t.Errorf("Total = %d, want 5", sum.Total)
+	}
+	if sum.Status2xx != 2 {
+		t.Errorf("Status2xx = %d, want 2", sum.Status2xx)
+	}
+	if sum.Status4xx != 1 {
+		t.Errorf("Status4xx = %d, want 1", sum.Status4xx)
+	}
+	if sum.Errors != 1 {
+		t.Errorf("Errors = %d, want 1", sum.Errors)
+	}
+	if sum.Blocked != 1 {
+		t.Errorf("Blocked = %d, want 1", sum.Blocked)
+	}
+	if sum.NoIndex != 1 {
+		t.Errorf("NoIndex = %d, want 1", sum.NoIndex)
+	}
+	if sum.MaxDepth != 2 {
+		t.Errorf("MaxDepth = %d, want 2", sum.MaxDepth)
+	}
+	if sum.ContentTypes["text/html"] != 3 {
+		t.Errorf("ContentTypes[text/html] = %d, want 3", sum.ContentTypes["text/html"])
+	}
+	if sum.AvgDurationMs != 103 { // (100+200+10)/3, integer division
+		t.Errorf("AvgDurationMs = %d, want 103", sum.AvgDurationMs)
+	}
+
+	got, err := s.GetCrawl(crawlID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.PagesCount != 5 {
+		t.Errorf("PagesCount = %d, want 5 (recomputed, not the stale stored 0)", got.PagesCount)
+	}
+
+	var countersOK int
+	if err := s.w.QueryRow(`SELECT counters_ok FROM crawls WHERE id = ?`, crawlID).Scan(&countersOK); err != nil {
+		t.Fatalf("query counters_ok: %v", err)
+	}
+	if countersOK != 1 {
+		t.Errorf("counters_ok = %d, want 1", countersOK)
+	}
+
+	// AddPages (and hence AddPage) must keep working against the migrated
+	// schema: new columns and crawl_content_types must actually exist.
+	if _, err := s.AddPage(
+		Page{CrawlID: crawlID, URL: "https://example.com/new", Status: 200, ContentType: "text/html", FetchedAt: time.Now().UTC()},
+		nil,
+	); err != nil {
+		t.Fatalf("AddPage() after migration error = %v", err)
 	}
 }
 
@@ -368,6 +540,250 @@ func TestAddPage_DuplicateURLRejected(t *testing.T) {
 	}
 	if got.PagesCount != 1 {
 		t.Errorf("PagesCount = %d, want 1 (rejected insert must not increment)", got.PagesCount)
+	}
+}
+
+// --- AddPages (batches) ---
+
+func TestAddPages_UpdatesCountersAndContentTypes(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	batch := []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, ContentType: "text/html", DurationMs: 100, Depth: 0, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, ContentType: "text/html", DurationMs: 200, Depth: 1, NoIndex: true, FetchedAt: now},
+			Links: []Link{{ToURL: "https://example.com/b"}}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/missing", Status: 404, ContentType: "text/html", DurationMs: 10, Depth: 2, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/broken", Status: 500, ContentType: "application/json", DurationMs: 30, Depth: 1, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/blocked", Status: 0, Blocked: true, Depth: 3, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/err", Status: 0, Depth: 1, FetchedAt: now}},
+	}
+
+	ids, err := s.AddPages(c.ID, batch)
+	if err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+	if len(ids) != len(batch) {
+		t.Fatalf("len(ids) = %d, want %d", len(ids), len(batch))
+	}
+	for i, id := range ids {
+		if id == 0 {
+			t.Errorf("ids[%d] = 0, want non-zero", i)
+		}
+	}
+
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.PagesCount != 6 {
+		t.Errorf("PagesCount = %d, want 6", got.PagesCount)
+	}
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Status2xx != 2 || sum.Status4xx != 1 || sum.Status5xx != 1 || sum.Errors != 1 || sum.Blocked != 1 {
+		t.Errorf("Summary counts = %+v, want 2xx=2 4xx=1 5xx=1 errors=1 blocked=1", sum)
+	}
+	if sum.MaxDepth != 3 {
+		t.Errorf("MaxDepth = %d, want 3", sum.MaxDepth)
+	}
+	if sum.ContentTypes["text/html"] != 3 || sum.ContentTypes["application/json"] != 1 {
+		t.Errorf("ContentTypes = %+v, want text/html=3 application/json=1", sum.ContentTypes)
+	}
+
+	// A link inside the batch (pointing from /a to /b) must have landed too.
+	detail, err := s.GetPage(c.ID, ids[1])
+	if err != nil {
+		t.Fatalf("GetPage() error = %v", err)
+	}
+	if len(detail.Outlinks) != 1 || detail.Outlinks[0].ToURL != "https://example.com/b" {
+		t.Errorf("Outlinks = %+v, want one link to /b", detail.Outlinks)
+	}
+}
+
+func TestAddPages_SecondBatchAccumulatesCounters(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	if _, err := s.AddPages(c.ID, []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/1", Status: 200, ContentType: "text/html", DurationMs: 100, FetchedAt: now}},
+	}); err != nil {
+		t.Fatalf("first AddPages() error = %v", err)
+	}
+	if _, err := s.AddPages(c.ID, []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/2", Status: 200, ContentType: "text/html", DurationMs: 300, FetchedAt: now}},
+	}); err != nil {
+		t.Fatalf("second AddPages() error = %v", err)
+	}
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Total != 2 || sum.Status2xx != 2 {
+		t.Errorf("Total/Status2xx = %d/%d, want 2/2", sum.Total, sum.Status2xx)
+	}
+	if sum.ContentTypes["text/html"] != 2 {
+		t.Errorf("ContentTypes[text/html] = %d, want 2 (accumulated across batches)", sum.ContentTypes["text/html"])
+	}
+	if sum.AvgDurationMs != 200 { // (100+300)/2
+		t.Errorf("AvgDurationMs = %d, want 200", sum.AvgDurationMs)
+	}
+}
+
+// TestAddPages_DuplicateURLRollsBackWholeBatch checks that a duplicate URL
+// anywhere in a batch (against an existing page, or against an earlier page
+// in the same batch) rolls back every page, link and counter update from
+// that batch -- not just the offending page.
+func TestAddPages_DuplicateURLRollsBackWholeBatch(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	batch := []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/1", Status: 200, ContentType: "text/html", FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/2", Status: 200, ContentType: "text/html", FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/1", Status: 200, ContentType: "text/html", FetchedAt: now}}, // duplicate of the first
+	}
+
+	if _, err := s.AddPages(c.ID, batch); err == nil {
+		t.Fatal("AddPages() with duplicate URL in batch error = nil, want error")
+	}
+
+	got, err := s.GetCrawl(c.ID)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	if got.PagesCount != 0 {
+		t.Errorf("PagesCount = %d, want 0 (whole batch rolled back)", got.PagesCount)
+	}
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.Total != 0 || len(sum.ContentTypes) != 0 {
+		t.Errorf("Summary = %+v, want empty (whole batch rolled back)", sum)
+	}
+	if _, err := s.FindPageByURL(c.ID, "https://example.com/2"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("FindPageByURL(/2) err = %v, want ErrNotFound (rolled back)", err)
+	}
+}
+
+// TestSummarize_MatchesDirectCountAfterSeveralBatches inserts a mix of
+// codes, blocked pages, errors, noindex pages and content types across
+// several AddPages batches, then checks that Summarize's O(1) counters
+// agree with a direct COUNT(*)/aggregate over pages -- the whole point of
+// keeping them in sync incrementally (see "Contadores" in
+// specs/003-store.md).
+func TestSummarize_MatchesDirectCountAfterSeveralBatches(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	statuses := []int{200, 200, 201, 301, 404, 404, 500, 0, 0}
+	blocked := []bool{false, false, false, false, false, false, false, true, false}
+	noindex := []bool{false, true, false, false, false, false, false, false, false}
+	contentTypes := []string{"text/html", "text/html", "application/json", "", "text/html", "", "text/html", "", ""}
+	depths := []int{0, 1, 2, 1, 3, 2, 1, 4, 2}
+
+	batches := [][]int{{0, 1, 2}, {3, 4}, {5, 6, 7, 8}}
+	for bi, idxs := range batches {
+		var batch []PageWithLinks
+		for _, i := range idxs {
+			batch = append(batch, PageWithLinks{Page: Page{
+				CrawlID:     c.ID,
+				URL:         fmt.Sprintf("https://example.com/p%d", i),
+				Status:      statuses[i],
+				Blocked:     blocked[i],
+				NoIndex:     noindex[i],
+				ContentType: contentTypes[i],
+				Depth:       depths[i],
+				DurationMs:  int64(10 * (i + 1)),
+				FetchedAt:   now,
+			}})
+		}
+		if _, err := s.AddPages(c.ID, batch); err != nil {
+			t.Fatalf("AddPages() batch %d error = %v", bi, err)
+		}
+	}
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+
+	var wantTotal, want2xx, want3xx, want4xx, want5xx, wantErrors, wantBlocked, wantNoIndex, wantMaxDepth int
+	var wantDurSum, wantDurN int64
+	wantCT := map[string]int{}
+	for i, st := range statuses {
+		wantTotal++
+		switch {
+		case st >= 200 && st <= 299:
+			want2xx++
+		case st >= 300 && st <= 399:
+			want3xx++
+		case st >= 400 && st <= 499:
+			want4xx++
+		case st >= 500 && st <= 599:
+			want5xx++
+		case st == 0 && !blocked[i]:
+			wantErrors++
+		}
+		if blocked[i] {
+			wantBlocked++
+		}
+		if noindex[i] {
+			wantNoIndex++
+		}
+		if depths[i] > wantMaxDepth {
+			wantMaxDepth = depths[i]
+		}
+		if st > 0 {
+			wantDurSum += int64(10 * (i + 1))
+			wantDurN++
+		}
+		if contentTypes[i] != "" {
+			wantCT[contentTypes[i]]++
+		}
+	}
+	wantAvg := int64(0)
+	if wantDurN > 0 {
+		wantAvg = wantDurSum / wantDurN
+	}
+
+	if sum.Total != wantTotal || sum.Status2xx != want2xx || sum.Status3xx != want3xx ||
+		sum.Status4xx != want4xx || sum.Status5xx != want5xx || sum.Errors != wantErrors ||
+		sum.Blocked != wantBlocked || sum.NoIndex != wantNoIndex || sum.MaxDepth != wantMaxDepth ||
+		sum.AvgDurationMs != wantAvg {
+		t.Fatalf("Summarize() = %+v, want total=%d 2xx=%d 3xx=%d 4xx=%d 5xx=%d errors=%d blocked=%d noindex=%d maxdepth=%d avg=%d",
+			sum, wantTotal, want2xx, want3xx, want4xx, want5xx, wantErrors, wantBlocked, wantNoIndex, wantMaxDepth, wantAvg)
+	}
+	for ct, n := range wantCT {
+		if sum.ContentTypes[ct] != n {
+			t.Errorf("ContentTypes[%q] = %d, want %d", ct, sum.ContentTypes[ct], n)
+		}
+	}
+
+	// Direct recount over pages must agree with the incrementally
+	// maintained counters.
+	var directTotal int
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM pages WHERE crawl_id = ?`, c.ID).Scan(&directTotal); err != nil {
+		t.Fatalf("direct COUNT(*) error = %v", err)
+	}
+	if directTotal != sum.Total {
+		t.Errorf("direct COUNT(*) = %d, Summarize().Total = %d, want equal", directTotal, sum.Total)
+	}
+	var direct2xx int
+	if err := s.r.QueryRow(`SELECT COUNT(*) FROM pages WHERE crawl_id = ? AND status BETWEEN 200 AND 299`, c.ID).Scan(&direct2xx); err != nil {
+		t.Fatalf("direct COUNT(*) 2xx error = %v", err)
+	}
+	if direct2xx != sum.Status2xx {
+		t.Errorf("direct 2xx COUNT(*) = %d, Summarize().Status2xx = %d, want equal", direct2xx, sum.Status2xx)
 	}
 }
 
@@ -956,6 +1372,102 @@ func TestConcurrentRead_NotBlockedByOpenWriteTransaction(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("GetCrawl() did not return within 1s while a write transaction was open on the write pool")
+	}
+}
+
+// --- Checkpoint ---
+
+func TestCheckpoint_TruncateEmptiesWAL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eanbot.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer s.Close()
+
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+	for i := 0; i < 20; i++ {
+		p := Page{CrawlID: c.ID, URL: fmt.Sprintf("https://example.com/%d", i), Status: 200, FetchedAt: now}
+		if _, err := s.AddPage(p, nil); err != nil {
+			t.Fatalf("AddPage() error = %v", err)
+		}
+	}
+
+	if err := s.Checkpoint("TRUNCATE"); err != nil {
+		t.Fatalf("Checkpoint(TRUNCATE) error = %v", err)
+	}
+
+	walPath := path + "-wal"
+	info, err := os.Stat(walPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // no -wal file at all is also "0 bytes" for our purposes
+		}
+		t.Fatalf("stat %s: %v", walPath, err)
+	}
+	if info.Size() != 0 {
+		t.Errorf("-wal size = %d, want 0 after TRUNCATE checkpoint", info.Size())
+	}
+}
+
+func TestCheckpoint_InvalidMode(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Checkpoint("BOGUS"); err == nil {
+		t.Error("Checkpoint(BOGUS) error = nil, want error")
+	}
+}
+
+// TestCheckpoint_BackgroundLoopRuns shrinks the package-level
+// checkpointInterval so the background goroutine started by Open runs
+// several times within the test's lifetime, then checks that it actually
+// ran PRAGMA wal_checkpoint(RESTART) periodically: writing the same number
+// of pages, with pauses in between, leaves far fewer WAL frames
+// uncheckpointed with a short interval than with checkpointing effectively
+// disabled (a very long interval). RESTART does not shrink the WAL file
+// itself (only TRUNCATE does, see TestCheckpoint_TruncateEmptiesWAL) -- it
+// checkpoints frames into the database file and lets the WAL be reused from
+// the start, which is exactly what keeps a long crawl's WAL from growing
+// without bound between the TRUNCATE checkpoints FinishCrawl/DeleteCrawl/
+// Close run.
+func TestCheckpoint_BackgroundLoopRuns(t *testing.T) {
+	walLogFrames := func(interval time.Duration) int {
+		orig := checkpointInterval
+		checkpointInterval = interval
+		defer func() { checkpointInterval = orig }()
+
+		dir := t.TempDir()
+		s, err := Open(filepath.Join(dir, "eanbot.db"))
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer s.Close()
+
+		c := mustCreateCrawl(t, s, "https://example.com")
+		now := time.Now().UTC()
+		for i := 0; i < 30; i++ {
+			p := Page{CrawlID: c.ID, URL: fmt.Sprintf("https://example.com/%d", i), Status: 200, FetchedAt: now}
+			if _, err := s.AddPage(p, nil); err != nil {
+				t.Fatalf("AddPage() error = %v", err)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(30 * time.Millisecond) // let a final tick land
+
+		var busy, log, checkpointed int
+		if err := s.w.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &log, &checkpointed); err != nil {
+			t.Fatalf("PRAGMA wal_checkpoint(PASSIVE) error = %v", err)
+		}
+		return log
+	}
+
+	withFrequentCheckpoints := walLogFrames(10 * time.Millisecond)
+	withoutCheckpointing := walLogFrames(time.Hour)
+
+	if withFrequentCheckpoints >= withoutCheckpointing {
+		t.Errorf("WAL frames left with a 10ms checkpoint interval (%d) not smaller than with checkpointing effectively disabled (%d)",
+			withFrequentCheckpoints, withoutCheckpointing)
 	}
 }
 

@@ -7,11 +7,15 @@ import (
 	"fmt"
 )
 
-// CreateCrawl inserts a new crawl in "running" state and returns it.
+// CreateCrawl inserts a new crawl in "running" state and returns it. It
+// starts with counters_ok = 1: a freshly created crawl has no pages yet, so
+// its (zero-valued) counters already reflect its pages, unlike a crawl
+// migrated from before specs/003-store.md's "Contadores" (see
+// backfillCounters in store.go).
 func (s *Store) CreateCrawl(seed string, config json.RawMessage) (*Crawl, error) {
 	startedAt := nowString()
 	res, err := s.w.Exec(
-		`INSERT INTO crawls (seed, status, config, started_at) VALUES (?, 'running', ?, ?)`,
+		`INSERT INTO crawls (seed, status, config, started_at, counters_ok) VALUES (?, 'running', ?, ?, 1)`,
 		seed, string(config), startedAt,
 	)
 	if err != nil {
@@ -49,6 +53,11 @@ func (s *Store) FinishCrawl(crawlID int64, status, errMsg string) error {
 		return fmt.Errorf("store: finish crawl %d: %w", crawlID, err)
 	}
 	if n > 0 {
+		// Best effort: a long crawl can grow the WAL substantially between
+		// checkpoints (see "Checkpoints" in specs/003-store.md); truncate it
+		// now that the crawl is done. store has no logger, and a failed
+		// checkpoint does not affect the data already committed.
+		_ = s.Checkpoint("TRUNCATE")
 		return nil
 	}
 	// No row updated: either the crawl does not exist, or it exists but is
@@ -105,7 +114,13 @@ func (s *Store) DeleteCrawl(id int64) error {
 	if err != nil {
 		return fmt.Errorf("store: delete crawl %d: %w", id, err)
 	}
-	return checkRowsAffected(res, id)
+	if err := checkRowsAffected(res, id); err != nil {
+		return err
+	}
+	// Best effort, same reasoning as FinishCrawl: a deleted crawl can free a
+	// lot of rows at once, worth reclaiming from the WAL right away.
+	_ = s.Checkpoint("TRUNCATE")
+	return nil
 }
 
 // crawlExists reports whether a crawl with the given id exists.

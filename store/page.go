@@ -8,52 +8,156 @@ import (
 	"time"
 )
 
-// AddPage inserts a page and its outgoing links in a single transaction and
-// increments the owning crawl's pages_count. It returns the new page id.
-// Inserting a page whose URL already exists in the same crawl fails (the
-// UNIQUE(crawl_id, url) constraint).
+// AddPage inserts a page and its outgoing links. It is AddPages with a
+// single-element batch; see AddPages for the transaction and counter
+// semantics.
 func (s *Store) AddPage(p Page, links []Link) (int64, error) {
+	ids, err := s.AddPages(p.CrawlID, []PageWithLinks{{Page: p, Links: links}})
+	if err != nil {
+		return 0, err
+	}
+	return ids[0], nil
+}
+
+// AddPages inserts a batch of pages (and each one's outgoing links) in a
+// single transaction, and updates the owning crawl's O(1) summary counters
+// (pages_count, count_*, max_depth, duration_sum/duration_n) and
+// crawl_content_types in that same transaction, per specs/003-store.md
+// ("Contadores, lotes y checkpoints"). It returns the new page ids, in
+// batch order.
+//
+// If any URL in the batch already exists in the crawl (the UNIQUE(crawl_id,
+// url) constraint, whether against an already-stored page or against an
+// earlier page in the same batch), the whole batch -- pages, links and
+// counters alike -- is rolled back and an error is returned. This is what
+// BatchWriter relies on: a batch either lands entirely or not at all, so a
+// caller retrying it (or a future counters backfill) never has to reconcile
+// a partial write.
+func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) {
+	if len(batch) == 0 {
+		return nil, nil
+	}
+
 	tx, err := s.w.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("store: add page: %w", err)
+		return nil, fmt.Errorf("store: add pages to crawl %d: %w", crawlID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
-	res, err := tx.Exec(
+	pageStmt, err := tx.Prepare(
 		`INSERT INTO pages (
 			crawl_id, url, depth, status, content_type, size, duration_ms,
 			title, description, canonical, meta_robots, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.CrawlID, p.URL, p.Depth, p.Status, p.ContentType, p.Size, p.DurationMs,
-		p.Title, p.Description, p.Canonical, p.MetaRobots, boolToInt(p.NoIndex), boolToInt(p.NoFollow),
-		p.H1, p.RedirectTo, p.Error, boolToInt(p.Blocked), p.FetchedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("store: add page %q to crawl %d: %w", p.URL, p.CrawlID, err)
+		return nil, fmt.Errorf("store: add pages to crawl %d: %w", crawlID, err)
 	}
-	pageID, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("store: add page %q to crawl %d: %w", p.URL, p.CrawlID, err)
-	}
+	defer pageStmt.Close()
 
-	for _, l := range links {
-		if _, err := tx.Exec(
-			`INSERT INTO links (crawl_id, from_page_id, to_url, text, nofollow, in_scope) VALUES (?, ?, ?, ?, ?, ?)`,
-			p.CrawlID, pageID, l.ToURL, l.Text, boolToInt(l.NoFollow), boolToInt(l.InScope),
-		); err != nil {
-			return 0, fmt.Errorf("store: add link %q from page %q: %w", l.ToURL, p.URL, err)
+	linkStmt, err := tx.Prepare(
+		`INSERT INTO links (crawl_id, from_page_id, to_url, text, nofollow, in_scope) VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: add pages to crawl %d: %w", crawlID, err)
+	}
+	defer linkStmt.Close()
+
+	ids := make([]int64, 0, len(batch))
+	var (
+		c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth int
+		durSum, durN                                               int64
+	)
+	contentTypes := map[string]int{}
+
+	for _, item := range batch {
+		p := item.Page
+		res, err := pageStmt.Exec(
+			p.CrawlID, p.URL, p.Depth, p.Status, p.ContentType, p.Size, p.DurationMs,
+			p.Title, p.Description, p.Canonical, p.MetaRobots, boolToInt(p.NoIndex), boolToInt(p.NoFollow),
+			p.H1, p.RedirectTo, p.Error, boolToInt(p.Blocked), p.FetchedAt.UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("store: add page %q to crawl %d: %w", p.URL, crawlID, err)
+		}
+		pageID, err := res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("store: add page %q to crawl %d: %w", p.URL, crawlID, err)
+		}
+		ids = append(ids, pageID)
+
+		for _, l := range item.Links {
+			if _, err := linkStmt.Exec(
+				p.CrawlID, pageID, l.ToURL, l.Text, boolToInt(l.NoFollow), boolToInt(l.InScope),
+			); err != nil {
+				return nil, fmt.Errorf("store: add link %q from page %q: %w", l.ToURL, p.URL, err)
+			}
+		}
+
+		switch {
+		case p.Status >= 200 && p.Status <= 299:
+			c2xx++
+		case p.Status >= 300 && p.Status <= 399:
+			c3xx++
+		case p.Status >= 400 && p.Status <= 499:
+			c4xx++
+		case p.Status >= 500 && p.Status <= 599:
+			c5xx++
+		case p.Status == 0 && !p.Blocked:
+			cErr++
+		}
+		if p.Blocked {
+			cBlocked++
+		}
+		if p.NoIndex {
+			cNoIndex++
+		}
+		if p.Depth > maxDepth {
+			maxDepth = p.Depth
+		}
+		if p.Status > 0 {
+			durSum += p.DurationMs
+			durN++
+		}
+		if p.ContentType != "" {
+			contentTypes[p.ContentType]++
 		}
 	}
 
-	if _, err := tx.Exec(`UPDATE crawls SET pages_count = pages_count + 1 WHERE id = ?`, p.CrawlID); err != nil {
-		return 0, fmt.Errorf("store: increment pages_count for crawl %d: %w", p.CrawlID, err)
+	if _, err := tx.Exec(
+		`UPDATE crawls SET
+			pages_count = pages_count + ?,
+			count_2xx = count_2xx + ?,
+			count_3xx = count_3xx + ?,
+			count_4xx = count_4xx + ?,
+			count_5xx = count_5xx + ?,
+			count_errors = count_errors + ?,
+			count_blocked = count_blocked + ?,
+			count_noindex = count_noindex + ?,
+			max_depth = MAX(max_depth, ?),
+			duration_sum = duration_sum + ?,
+			duration_n = duration_n + ?
+		 WHERE id = ?`,
+		len(batch), c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth, durSum, durN, crawlID,
+	); err != nil {
+		return nil, fmt.Errorf("store: update counters for crawl %d: %w", crawlID, err)
+	}
+
+	for ct, n := range contentTypes {
+		if _, err := tx.Exec(
+			`INSERT INTO crawl_content_types (crawl_id, content_type, n) VALUES (?, ?, ?)
+			 ON CONFLICT(crawl_id, content_type) DO UPDATE SET n = n + excluded.n`,
+			crawlID, ct, n,
+		); err != nil {
+			return nil, fmt.Errorf("store: update content types for crawl %d: %w", crawlID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("store: add page %q to crawl %d: %w", p.URL, p.CrawlID, err)
+		return nil, fmt.Errorf("store: add pages to crawl %d: %w", crawlID, err)
 	}
-	return pageID, nil
+	return ids, nil
 }
 
 func boolToInt(b bool) int {
@@ -192,12 +296,31 @@ func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error) {
 	return p, nil
 }
 
+// pageFilterCounterColumn maps a PageFilter.Status value to the crawls
+// counter column that holds its O(1) total (see "Contadores" in
+// specs/003-store.md). ListPages uses it instead of COUNT(*) whenever
+// Query == "", since a plain COUNT(*) over pages does not scale to the
+// millions of rows a long crawl accumulates.
+var pageFilterCounterColumn = map[string]string{
+	"":        "pages_count",
+	"2xx":     "count_2xx",
+	"3xx":     "count_3xx",
+	"4xx":     "count_4xx",
+	"5xx":     "count_5xx",
+	"error":   "count_errors",
+	"blocked": "count_blocked",
+}
+
 // ListPages returns the pages of a crawl matching f, ordered by id, along
 // with the total number of matches (ignoring Limit/Offset).
 func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 	where := []string{"crawl_id = ?"}
 	args := []any{crawlID}
 
+	counterColumn, validStatus := pageFilterCounterColumn[f.Status]
+	if !validStatus {
+		return nil, 0, fmt.Errorf("status no válido")
+	}
 	switch f.Status {
 	case "":
 		// no filter
@@ -213,8 +336,6 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 		where = append(where, "status = 0 AND blocked = 0")
 	case "blocked":
 		where = append(where, "blocked = 1")
-	default:
-		return nil, 0, fmt.Errorf("status no válido")
 	}
 
 	if f.Query != "" {
@@ -226,9 +347,20 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 	whereClause := strings.Join(where, " AND ")
 
 	var total int
-	countQuery := "SELECT COUNT(*) FROM pages WHERE " + whereClause
-	if err := s.r.QueryRow(countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("store: count pages in crawl %d: %w", crawlID, err)
+	if f.Query == "" {
+		// counterColumn is one of the fixed literals in
+		// pageFilterCounterColumn, never caller input.
+		err := s.r.QueryRow("SELECT "+counterColumn+" FROM crawls WHERE id = ?", crawlID).Scan(&total)
+		if errors.Is(err, sql.ErrNoRows) {
+			total = 0 // unknown crawl: no pages either, and callers check existence themselves
+		} else if err != nil {
+			return nil, 0, fmt.Errorf("store: count pages in crawl %d: %w", crawlID, err)
+		}
+	} else {
+		countQuery := "SELECT COUNT(*) FROM pages WHERE " + whereClause
+		if err := s.r.QueryRow(countQuery, args...).Scan(&total); err != nil {
+			return nil, 0, fmt.Errorf("store: count pages in crawl %d: %w", crawlID, err)
+		}
 	}
 
 	limit := clampLimit(f.Limit)

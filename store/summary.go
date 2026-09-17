@@ -1,59 +1,41 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
 
-// Summarize aggregates the pages of a crawl. It returns ErrNotFound if the
-// crawl does not exist.
+// Summarize reports the crawls.count_* counters maintained by AddPages,
+// plus crawl_content_types, rather than scanning pages -- see "Contadores"
+// in specs/003-store.md: with a crawl of over a million pages, aggregating
+// pages on every summary request made the UI unusable. It returns
+// ErrNotFound if the crawl does not exist.
 func (s *Store) Summarize(crawlID int64) (*Summary, error) {
-	exists, err := s.crawlExists(crawlID)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, ErrNotFound
-	}
-
 	sum := &Summary{ContentTypes: map[string]int{}}
 
+	var durSum, durN int64
 	row := s.r.QueryRow(
-		`SELECT
-			COUNT(*),
-			COUNT(*) FILTER (WHERE status BETWEEN 200 AND 299),
-			COUNT(*) FILTER (WHERE status BETWEEN 300 AND 399),
-			COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499),
-			COUNT(*) FILTER (WHERE status BETWEEN 500 AND 599),
-			COUNT(*) FILTER (WHERE status = 0 AND blocked = 0),
-			COUNT(*) FILTER (WHERE blocked = 1),
-			COUNT(*) FILTER (WHERE noindex = 1),
-			COALESCE(MAX(depth), 0)
-		 FROM pages WHERE crawl_id = ?`,
+		`SELECT pages_count, count_2xx, count_3xx, count_4xx, count_5xx, count_errors,
+			count_blocked, count_noindex, max_depth, duration_sum, duration_n
+		 FROM crawls WHERE id = ?`,
 		crawlID,
 	)
 	if err := row.Scan(
 		&sum.Total, &sum.Status2xx, &sum.Status3xx, &sum.Status4xx, &sum.Status5xx,
-		&sum.Errors, &sum.Blocked, &sum.NoIndex, &sum.MaxDepth,
+		&sum.Errors, &sum.Blocked, &sum.NoIndex, &sum.MaxDepth, &durSum, &durN,
 	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("store: summarize crawl %d: %w", crawlID, err)
 	}
-
-	var durSum, durCount int64
-	if err := s.r.QueryRow(
-		`SELECT COALESCE(SUM(duration_ms), 0), COUNT(*) FROM pages WHERE crawl_id = ? AND status > 0`,
-		crawlID,
-	).Scan(&durSum, &durCount); err != nil {
-		return nil, fmt.Errorf("store: summarize crawl %d: %w", crawlID, err)
-	}
-	if durCount > 0 {
-		sum.AvgDurationMs = durSum / durCount
+	if durN > 0 {
+		sum.AvgDurationMs = durSum / durN
 	}
 
-	rows, err := s.r.Query(
-		`SELECT content_type, COUNT(*) FROM pages WHERE crawl_id = ? AND content_type != '' GROUP BY content_type`,
-		crawlID,
-	)
+	rows, err := s.r.Query(`SELECT content_type, n FROM crawl_content_types WHERE crawl_id = ?`, crawlID)
 	if err != nil {
 		return nil, fmt.Errorf("store: summarize crawl %d: %w", crawlID, err)
 	}
