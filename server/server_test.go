@@ -401,7 +401,7 @@ func TestPostCrawl_HeadersPassedToFetcherAndStored(t *testing.T) {
 
 	reqBody := mustJSON(t, map[string]any{
 		"seed":    "https://headers.example/",
-		"headers": map[string]string{"X-Ean-Client": "abc"},
+		"headers": map[string]string{"X-Crawler-Token": "abc"},
 	})
 	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
 	if w.Code != http.StatusCreated {
@@ -411,8 +411,8 @@ func TestPostCrawl_HeadersPassedToFetcherAndStored(t *testing.T) {
 
 	waitUntilDone(t, h, crawl.ID, 5*time.Second)
 
-	if gotCfg.Headers["X-Ean-Client"] != "abc" {
-		t.Errorf("NewFetcher received Config.Headers = %v, want X-Ean-Client=abc", gotCfg.Headers)
+	if gotCfg.Headers["X-Crawler-Token"] != "abc" {
+		t.Errorf("NewFetcher received Config.Headers = %v, want X-Crawler-Token=abc", gotCfg.Headers)
 	}
 
 	var cfg map[string]any
@@ -423,8 +423,8 @@ func TestPostCrawl_HeadersPassedToFetcherAndStored(t *testing.T) {
 	if !ok {
 		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
 	}
-	if headers["X-Ean-Client"] != "abc" {
-		t.Errorf("stored headers = %v, want X-Ean-Client=abc (name as sent by the user)", headers)
+	if headers["X-Crawler-Token"] != "abc" {
+		t.Errorf("stored headers = %v, want X-Crawler-Token=abc (name as sent by the user)", headers)
 	}
 }
 
@@ -491,7 +491,7 @@ func TestPostCrawl_OriginAndInsecureTLSPassedToFetcherAndStored(t *testing.T) {
 
 	reqBody := mustJSON(t, map[string]any{
 		"seed":         "https://origin.example/",
-		"origin":       "172.16.0.10",
+		"origin":       "203.0.113.10",
 		"insecure_tls": true,
 	})
 	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
@@ -502,8 +502,8 @@ func TestPostCrawl_OriginAndInsecureTLSPassedToFetcherAndStored(t *testing.T) {
 
 	waitUntilDone(t, h, crawl.ID, 5*time.Second)
 
-	if gotCfg.Origin != "172.16.0.10" {
-		t.Errorf("NewFetcher received Config.Origin = %q, want %q", gotCfg.Origin, "172.16.0.10")
+	if gotCfg.Origin != "203.0.113.10" {
+		t.Errorf("NewFetcher received Config.Origin = %q, want %q", gotCfg.Origin, "203.0.113.10")
 	}
 	if !gotCfg.InsecureTLS {
 		t.Error("NewFetcher received Config.InsecureTLS = false, want true")
@@ -513,8 +513,8 @@ func TestPostCrawl_OriginAndInsecureTLSPassedToFetcherAndStored(t *testing.T) {
 	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
-	if cfg["origin"] != "172.16.0.10" {
-		t.Errorf("stored origin = %v, want %q", cfg["origin"], "172.16.0.10")
+	if cfg["origin"] != "203.0.113.10" {
+		t.Errorf("stored origin = %v, want %q", cfg["origin"], "203.0.113.10")
 	}
 	if cfg["insecure_tls"] != true {
 		t.Errorf("stored insecure_tls = %v, want true", cfg["insecure_tls"])

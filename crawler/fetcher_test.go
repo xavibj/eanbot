@@ -107,12 +107,12 @@ func TestHTTPFetcherSendsCustomHeaders(t *testing.T) {
 	defer srv.Close()
 
 	fetcher := NewHTTPFetcher("EANBot-Test/1.0", 5*time.Second, 1024)
-	fetcher.Headers = map[string]string{"x-ean-client": "XXXXXXXX"}
+	fetcher.Headers = map[string]string{"x-crawler-token": "XXXXXXXX"}
 	if _, err := fetcher.Fetch(context.Background(), srv.URL); err != nil {
 		t.Fatalf("Fetch error: %v", err)
 	}
-	if got.Get("X-Ean-Client") != "XXXXXXXX" {
-		t.Errorf("X-Ean-Client = %q, want %q", got.Get("X-Ean-Client"), "XXXXXXXX")
+	if got.Get("X-Crawler-Token") != "XXXXXXXX" {
+		t.Errorf("X-Crawler-Token = %q, want %q", got.Get("X-Crawler-Token"), "XXXXXXXX")
 	}
 }
 
@@ -127,12 +127,12 @@ func TestHTTPFetcherSendsCustomHeadersToRobotsTxt(t *testing.T) {
 	defer srv.Close()
 
 	fetcher := NewHTTPFetcher("EANBot-Test/1.0", 5*time.Second, 1024)
-	fetcher.Headers = map[string]string{"x-ean-client": "XXXXXXXX"}
+	fetcher.Headers = map[string]string{"x-crawler-token": "XXXXXXXX"}
 	if _, err := fetcher.Fetch(context.Background(), srv.URL+"/robots.txt"); err != nil {
 		t.Fatalf("Fetch error: %v", err)
 	}
-	if gotRobots.Get("X-Ean-Client") != "XXXXXXXX" {
-		t.Errorf("X-Ean-Client on robots.txt = %q, want %q", gotRobots.Get("X-Ean-Client"), "XXXXXXXX")
+	if gotRobots.Get("X-Crawler-Token") != "XXXXXXXX" {
+		t.Errorf("X-Crawler-Token on robots.txt = %q, want %q", gotRobots.Get("X-Crawler-Token"), "XXXXXXXX")
 	}
 }
 

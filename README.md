@@ -26,7 +26,7 @@ el bot adopta el host destino como ámbito del rastreo.
 
 Flags de `crawl`: `-db`, `-max-pages`, `-max-depth`, `-concurrency`, `-delay`,
 `-timeout`, `-user-agent`, `-include-subdomains`, `-ignore-robots`,
-`-no-sitemaps`, `-header "Nombre: valor"` (repetible; p. ej. `-header "x-ean-client: XXXX"`
+`-no-sitemaps`, `-header "Nombre: valor"` (repetible; p. ej. `-header "x-crawler-token: XXXX"`
 para que Cloudflare no bloquee al bot), `-origin ip[:puerto]` (conecta
 directamente al servidor de origen del host de la semilla, saltando Cloudflare;
 `Host` y SNI siguen siendo los del sitio, como `curl --resolve`),
@@ -36,8 +36,8 @@ rastreado. En la API y la web, esas opciones van en `config.headers`,
 `config.origin` y `config.insecure_tls`.
 
 ```sh
-./bin/eanbot crawl https://fo-test.electricautomationnetwork.com \
-    -origin 172.16.0.10 -insecure-tls -header "x-ean-client: XXXXXXXX"
+./bin/eanbot crawl https://www.ejemplo.com \
+    -origin 203.0.113.10 -insecure-tls -header "x-crawler-token: XXXXXXXX"
 ```
 
 ## API
@@ -51,11 +51,12 @@ Contrato completo en `specs/004-api-web.md`.
 ## Docker
 
 ```sh
-make docker VERSION=0.1.0        # compila frontend (Vite) y Go en la imagen; FROM scratch, uid 65532
+make docker VERSION=0.1.0        # imagen local eanbot:0.1.0; compila frontend (Vite) y Go dentro; FROM scratch, uid 65532
 docker volume create eanbot-data
 docker run -d --name eanbot -p 8345:8345 -v eanbot-data:/data \
-    7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot:0.1.0
+    eanbot:0.1.0
 docker exec eanbot /eanbot crawl https://xavi.net -db /data/eanbot.db
+make push IMAGE=registry.example.com/mi-equipo/eanbot VERSION=0.1.0   # opcional: subir a un registry
 ```
 
 Con un directorio del host en vez de volumen (`-v $PWD/data:/data`), hazlo

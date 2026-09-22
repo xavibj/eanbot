@@ -48,8 +48,8 @@ interno"]}`.
   "timeout_ms": 15000, "max_body_bytes": 2097152,
   "user_agent": "EANBot/0.1 (+https://xavi.net)",
   "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true,
-  "headers": {"x-ean-client": "XXXXXXXX"},
-  "origin": "172.16.0.10", "insecure_tls": false
+  "headers": {"x-crawler-token": "XXXXXXXX"},
+  "origin": "203.0.113.10", "insecure_tls": false
 }
 ```
 
@@ -127,7 +127,7 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      formato `Nombre: valor`; líneas vacías ignoradas; una línea sin `:` se
      rechaza en cliente con el mensaje «cabecera sin “:” en la línea N»).
      Se envía como objeto `headers`. Campo «IP del origen (saltar
-     Cloudflare)» (`type="text"`, placeholder `172.16.0.10`, ayuda: «ip o
+     Cloudflare)» (`type="text"`, placeholder `203.0.113.10`, ayuda: «ip o
      ip:puerto; la cabecera Host y el SNI siguen siendo los del sitio») que se
      envía como `origin` solo si no está vacío, y checkbox «No verificar el
      certificado TLS» (`insecure_tls`, siempre enviado; ayuda: «solo para

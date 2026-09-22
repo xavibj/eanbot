@@ -1,3 +1,6 @@
+# Builds the Docker image and pushes it to the registry configured in the
+# repository variables: DOCKER_REGISTRY (host), DOCKER_PROJECT (namespace),
+# DOCKER_USER and DOCKER_PASSWORD (secured).
 image: atlassian/default-image:3
 
 pipelines:
@@ -7,18 +10,13 @@ pipelines:
         runs-on:
           - self.hosted
           - linux
-          - ean
         script:
-          - echo ${harbor_pwd} | docker login --username "$harbor_user" --password-stdin 7u40qj0f.gra7.container-registry.ovh.net
-          - IMAGE_NAME=$BITBUCKET_REPO_SLUG
-          - echo $DOTENV_B64 | base64 -d > .env
-          - docker build . --file Dockerfile --tag $BITBUCKET_REPO_SLUG
+          - echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USER}" --password-stdin "${DOCKER_REGISTRY}"
+          - IMAGE="${DOCKER_REGISTRY}/${DOCKER_PROJECT}/${BITBUCKET_REPO_SLUG}"
           - VERSION="build-${BITBUCKET_BUILD_NUMBER}"
-          - IMAGE=${harbor_prj}/${IMAGE_NAME}
-          - docker tag "${IMAGE_NAME}" "7u40qj0f.gra7.container-registry.ovh.net/${IMAGE}:${VERSION}"
-          - docker tag "${IMAGE_NAME}" "7u40qj0f.gra7.container-registry.ovh.net/${IMAGE}:latest"
-          - docker push "7u40qj0f.gra7.container-registry.ovh.net/${IMAGE}:${VERSION}"
-          - docker push "7u40qj0f.gra7.container-registry.ovh.net/${IMAGE}:latest"
+          - docker build . --file Dockerfile --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:latest"
+          - docker push "${IMAGE}:${VERSION}"
+          - docker push "${IMAGE}:latest"
         services:
           - docker
         caches:

@@ -83,9 +83,9 @@ func TestConfigValidate(t *testing.T) {
 			name: "invalid header name",
 			cfg: Config{
 				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
-				Headers: map[string]string{"x ean": "abc"},
+				Headers: map[string]string{"x token": "abc"},
 			},
-			want: []string{`cabecera no válida: "x ean"`},
+			want: []string{`cabecera no válida: "x token"`},
 		},
 		{
 			name: "empty header name",
@@ -99,23 +99,23 @@ func TestConfigValidate(t *testing.T) {
 			name: "header value with newline",
 			cfg: Config{
 				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
-				Headers: map[string]string{"X-Ean-Client": "abc\ndef"},
+				Headers: map[string]string{"X-Crawler-Token": "abc\ndef"},
 			},
-			want: []string{`valor de cabecera no válido: "X-Ean-Client"`},
+			want: []string{`valor de cabecera no válido: "X-Crawler-Token"`},
 		},
 		{
 			name: "header value with carriage return",
 			cfg: Config{
 				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
-				Headers: map[string]string{"X-Ean-Client": "abc\rdef"},
+				Headers: map[string]string{"X-Crawler-Token": "abc\rdef"},
 			},
-			want: []string{`valor de cabecera no válido: "X-Ean-Client"`},
+			want: []string{`valor de cabecera no válido: "X-Crawler-Token"`},
 		},
 		{
 			name: "valid custom header",
 			cfg: Config{
 				Seed: "https://example.com/", MaxPages: 1, Concurrency: 1,
-				Headers: map[string]string{"X-Ean-Client": "abc"},
+				Headers: map[string]string{"X-Crawler-Token": "abc"},
 			},
 			want: nil,
 		},

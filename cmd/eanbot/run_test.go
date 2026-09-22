@@ -189,7 +189,7 @@ func TestCrawlHeaderFlagSentToServer(t *testing.T) {
 		if r.URL.Path == "/robots.txt" {
 			return
 		}
-		if r.Header.Get("X-Ean-Client") != "abc" {
+		if r.Header.Get("X-Crawler-Token") != "abc" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -199,7 +199,7 @@ func TestCrawlHeaderFlagSentToServer(t *testing.T) {
 	defer srv.Close()
 
 	code, stdout, stderr := runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet",
-		"-header", "X-Ean-Client: abc")
+		"-header", "X-Crawler-Token: abc")
 	if code != 0 {
 		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
 	}
@@ -230,7 +230,7 @@ func TestCrawlHeaderFlagStoredInConfig(t *testing.T) {
 	defer srv.Close()
 
 	code, stdout, stderr := runCrawl(t, srv, tempDBPath(t), "-max-pages", "1", "-json", "-quiet",
-		"-header", "X-Ean-Client: abc")
+		"-header", "X-Crawler-Token: abc")
 	if code != 0 {
 		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
 	}
@@ -246,8 +246,8 @@ func TestCrawlHeaderFlagStoredInConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("config[\"headers\"] = %v (%T), want an object", cfg["headers"], cfg["headers"])
 	}
-	if headers["X-Ean-Client"] != "abc" {
-		t.Errorf("stored headers = %v, want X-Ean-Client=abc", headers)
+	if headers["X-Crawler-Token"] != "abc" {
+		t.Errorf("stored headers = %v, want X-Crawler-Token=abc", headers)
 	}
 }
 

@@ -30,7 +30,7 @@ el fichero SQLite montado en `/data`.
 ## Makefile
 
 ```make
-IMAGE   ?= 7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot
+IMAGE   ?= eanbot            # nombre local; para subir: make push IMAGE=<registry>/<ns>/eanbot
 VERSION ?= dev
 docker:      docker build --platform linux/amd64 -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
 push:        docker push $(IMAGE):$(VERSION) && docker push $(IMAGE):latest
@@ -43,7 +43,7 @@ docker-run:  docker run --rm -p 8345:8345 -v eanbot-data:/data $(IMAGE):$(VERSIO
 make docker VERSION=0.1.0
 docker volume create eanbot-data
 docker run -d --name eanbot -p 8345:8345 -v eanbot-data:/data \
-    7u40qj0f.gra7.container-registry.ovh.net/ean/eanbot:0.1.0
+    eanbot:0.1.0
 docker exec eanbot /eanbot crawl https://xavi.net -db /data/eanbot.db   # CLI dentro del contenedor
 ```
 
