@@ -9,7 +9,10 @@ error, y los enlaces salientes y entrantes.
 
 ## Uso rápido
 
+Requiere Go 1.27 (Node solo para modificar el frontend).
+
 ```sh
+git clone https://github.com/xavibj/eanbot.git && cd eanbot
 make build                                   # bin/eanbot (sin Node: el frontend ya está compilado)
 ./bin/eanbot crawl https://xavi.net -max-pages 200 -concurrency 2 -delay 300ms
 ./bin/eanbot crawls                          # lista de rastreos
@@ -77,3 +80,7 @@ make test vet fmt        # suite completa
 make frontend            # requiere Node (ruta nvm en el Makefile)
 cd web && npm run dev    # dev server con proxy /api → :8345
 ```
+
+## Licencia
+
+MIT, ver `LICENSE`.
