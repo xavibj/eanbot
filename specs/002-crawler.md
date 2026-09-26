@@ -24,6 +24,7 @@ type Config struct {
     Headers           map[string]string // cabeceras extra en TODAS las peticiones (páginas, robots, sitemaps)
     Origin            string        // "ip" o "ip:puerto" del servidor de origen (saltar Cloudflare); "" = DNS normal
     InsecureTLS       bool          // no verificar el certificado TLS (Origin CA de Cloudflare, certificados propios)
+    FollowNoFollow    bool          // por defecto false: seguir también los enlaces rel=nofollow y los de páginas con nofollow (meta o X-Robots-Tag)
 }
 
 func Defaults() Config                  // los valores de specs/001
@@ -34,6 +35,7 @@ type Response struct {
     Status      int
     ContentType string        // cabecera cruda
     Location    string        // cabecera Location si 3xx
+    XRobotsTag  string        // cabecera(s) X-Robots-Tag, unidas por ", " si hay varias; "" si no hay
     Body        []byte        // como máximo MaxBodyBytes
     Truncated   bool          // body cortado por MaxBodyBytes
     Size        int64         // bytes leídos (== len(Body))
@@ -86,8 +88,10 @@ type Page struct {
     Description string
     Canonical   string        // absoluta normalizada, "" si no hay
     MetaRobots  string        // contenido crudo de <meta name="robots">
+    XRobotsTag  string        // cabecera X-Robots-Tag cruda (cualquier tipo de contenido, también PDF)
     NoIndex     bool
-    NoFollow    bool          // meta robots nofollow
+    NoFollow    bool          // nofollow por meta robots O por X-Robots-Tag (ver «Directivas robots»)
+    ViaNoFollow bool          // la URL se descubrió únicamente por enlaces nofollow (solo puede ser true con FollowNoFollow)
     H1          string
     RedirectTo  string        // absoluta normalizada si 3xx con Location
     Error       string        // "" si ok; texto del error de red/lectura
