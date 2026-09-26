@@ -29,7 +29,7 @@ type Report struct {
     DuplicateTitles []TitleGroup     `json:"duplicate_titles"` // top 20 por n desc (solo 2xx text/html, título no vacío)
     Slowest       []PageRef          `json:"slowest"`         // top 10 por duration_ms (status > 0)
     Largest       []PageRef          `json:"largest"`         // top 10 por size (status > 0)
-    Samples       map[string][]PageRef `json:"samples"`       // claves: "3xx","4xx","5xx","error","blocked","noindex"; 10 al azar por clave (reservoir sampling determinista con semilla fija en tests)
+    Samples       map[string][]PageRef `json:"samples"`       // claves: "3xx","4xx","5xx","error","blocked","noindex","via_nofollow"; 10 al azar por clave (reservoir sampling determinista con semilla fija en tests)
 }
 
 type Bucket struct {
@@ -42,6 +42,7 @@ type Bucket struct {
     Errors  int    `json:"errors"`
     Blocked int    `json:"blocked"`
     NoIndex int    `json:"noindex"`
+    ViaNoFollow int `json:"via_nofollow"`
     AvgMs   int64  `json:"avg_ms"`   // media entera sobre status > 0; 0 si no hay
 }
 type StatusCount struct{ Status string `json:"status"`; N int `json:"n"` }
@@ -101,7 +102,8 @@ comparten host tras quitar `www.`; si no, patrón `otro host`):
 ### Markdown
 
 `Markdown(r)` produce un documento con: título (`# Informe del rastreo #id —
-semilla`), línea de estado/fechas/config resumida, tabla de resumen, y una
+semilla`), línea de estado/fechas/config resumida, tabla de resumen (con la fila «Solo vía nofollow» si el rastreo tenía
+`follow_nofollow`), y una
 sección `##` por bloque en este orden: Códigos, Por profundidad, Por idioma,
 Por sección (top 50), Tipos de contenido, Redirecciones, Errores, Páginas
 rotas con más referrers, Títulos duplicados, Páginas más lentas, Páginas más

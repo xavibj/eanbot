@@ -59,6 +59,7 @@ CREATE TABLE crawls (
   count_errors  INTEGER NOT NULL DEFAULT 0,   -- status 0 y no bloqueada
   count_blocked INTEGER NOT NULL DEFAULT 0,
   count_noindex INTEGER NOT NULL DEFAULT 0,
+  count_via_nofollow INTEGER NOT NULL DEFAULT 0,
   max_depth     INTEGER NOT NULL DEFAULT 0,
   duration_sum  INTEGER NOT NULL DEFAULT 0,   -- suma de duration_ms de páginas con status > 0
   duration_n    INTEGER NOT NULL DEFAULT 0,   -- nº de páginas con status > 0
@@ -77,6 +78,8 @@ CREATE TABLE pages (
   description  TEXT NOT NULL DEFAULT '',
   canonical    TEXT NOT NULL DEFAULT '',
   meta_robots  TEXT NOT NULL DEFAULT '',
+  x_robots_tag TEXT NOT NULL DEFAULT '',
+  via_nofollow INTEGER NOT NULL DEFAULT 0,
   noindex      INTEGER NOT NULL DEFAULT 0,
   nofollow     INTEGER NOT NULL DEFAULT 0,
   h1           TEXT NOT NULL DEFAULT '',
@@ -136,6 +139,8 @@ type Page struct {
     Description string `json:"description"`
     Canonical   string `json:"canonical"`
     MetaRobots  string `json:"meta_robots"`
+    XRobotsTag  string `json:"x_robots_tag"`
+    ViaNoFollow bool   `json:"via_nofollow"`
     NoIndex     bool   `json:"noindex"`
     NoFollow    bool   `json:"nofollow"`
     H1          string `json:"h1"`
@@ -170,7 +175,7 @@ type PageWithLinks struct {
 }
 
 type PageFilter struct {
-    Status string // "", "2xx", "3xx", "4xx", "5xx", "error" (status 0 && !blocked), "blocked"
+    Status string // "", "2xx", "3xx", "4xx", "5xx", "error" (status 0 && !blocked), "blocked", "via_nofollow"
     Query  string // LIKE %q% sobre url o title
     Limit  int    // por defecto 100, máx. 1000
     Offset int
@@ -185,6 +190,7 @@ type Summary struct {
     Errors   int            `json:"errors"`
     Blocked  int            `json:"blocked"`
     NoIndex  int            `json:"noindex"`
+    ViaNoFollow int         `json:"via_nofollow"`
     ContentTypes map[string]int `json:"content_types"`
     MaxDepth int            `json:"max_depth"`
     AvgDurationMs int64     `json:"avg_duration_ms"` // solo páginas con status > 0
@@ -236,7 +242,9 @@ contadores para `total` cuando `Query == ""` (`""` → `pages_count`, `2xx` →
 `Query` hace `COUNT(*)`.
 
 **Migración.** El esquema es idempotente: `Open` añade con `ALTER TABLE ... ADD
-COLUMN` las columnas que falten (comprobando `PRAGMA table_info(crawls)`) y crea
+COLUMN` las columnas que falten (comprobando `PRAGMA table_info` de `crawls` y de
+`pages`; las nuevas `x_robots_tag`/`via_nofollow`/`count_via_nofollow` se añaden
+así a BBDD existentes) y crea
 `crawl_content_types` si no existe. Después, para cada crawl con `counters_ok = 0`,
 recalcula los contadores y los content types desde `pages` en una transacción y
 pone `counters_ok = 1`. Un crawl recién creado nace con `counters_ok = 1`.

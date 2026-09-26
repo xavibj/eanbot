@@ -110,6 +110,7 @@ type Stats struct {
     RobotsTxt                string // robots.txt del host final (ver "Motor")
     RobotsError              string // motivo por el que robots.txt no se pudo aplicar ("" si se obtuvo): "robots.txt: HTTP 503" o "robots.txt: <error de red/TLS>"
     Sitemaps                 int    // URLs descubiertas vía sitemaps
+    ViaNoFollow              int    // páginas visitadas que solo se descubrieron por enlaces nofollow
     FinalHost                string // host efectivo del ámbito (ver "Motor", cambio de ámbito de la semilla)
 }
 
@@ -182,6 +183,19 @@ rellena Title, Description, Canonical, MetaRobots/NoIndex/NoFollow, H1 y Links:
 `ContentType` del `Page` sale de `mime.ParseMediaType` de la cabecera; se
 parsea HTML solo si es `text/html` o `application/xhtml+xml`.
 
+## Directivas robots (meta y X-Robots-Tag)
+
+`func ParseRobotsDirectives(value, token string) (noindex, nofollow bool)`
+interpreta tanto el contenido de `<meta name="robots">` como la cabecera
+`X-Robots-Tag`: directivas separadas por comas, sin distinguir mayúsculas;
+`noindex`, `nofollow` y `none` (= ambas). Una directiva puede llevar prefijo de
+agente (`googlebot: noindex`, formato de X-Robots-Tag): se aplica solo si el
+prefijo contiene `token` (sin mayúsculas) o es `*`; sin prefijo se aplica
+siempre. `Page.NoIndex`/`Page.NoFollow` son el OR de la meta (solo HTML) y de la
+cabecera (cualquier tipo de contenido). El `HTTPFetcher` rellena
+`Response.XRobotsTag` con `strings.Join(resp.Header.Values("X-Robots-Tag"), ", ")`.
+`<meta name="googlebot">` no se lee (solo `robots`).
+
 ## Sitemaps
 
 Si `UseSitemaps` y no `IgnoreRobots`: por cada `Sitemap:` de robots se hace
@@ -198,7 +212,9 @@ NO se registran como Page hasta que se visitan. Errores de sitemap se ignoran
 type Frontier struct{ ... }
 func NewFrontier() *Frontier
 func (f *Frontier) Push(url string, depth int) bool  // false si ya vista (encolada o visitada)
-func (f *Frontier) Pop() (url string, depth int, ok bool)
+func (f *Frontier) PushNoFollow(url string, depth int) bool // como Push, marcando la URL como descubierta vía nofollow
+func (f *Frontier) ClearNoFollow(url string)          // quita la marca si la URL sigue encolada
+func (f *Frontier) Pop() (url string, depth int, viaNoFollow bool, ok bool)
 func (f *Frontier) Len() int
 ```
 FIFO estricta (BFS), dedupe por URL exacta normalizada. No es concurrente por
@@ -250,7 +266,17 @@ sí misma; el motor la protege con un mutex.
    asegura que entre dos inicios de petición pasan al menos `delay` (un
    `time.Ticker`/último inicio con mutex). El coordinador saca de la
    frontier mientras `fetched < MaxPages`. Cada resultado: `Sink.Page(p)`;
-   para cada `Link` en ámbito, no nofollow, y `p.NoFollow == false`, con
+   para cada `Link` en ámbito con `p.Depth+1 <= MaxDepth` → Push(depth+1),
+   salvo que el enlace sea nofollow o `p.NoFollow` sea true y `FollowNoFollow`
+   sea false (en ese caso el enlace se registra pero no se encola). Con
+   `FollowNoFollow`, un Push que tiene éxito desde un enlace nofollow (o desde
+   una página nofollow) marca la URL como «vía nofollow»; si más tarde llega a
+   la misma URL un enlace normal antes de visitarla, la marca se quita
+   (`Frontier.Push` devuelve false pero el motor llama a
+   `Frontier.ClearNoFollow(url)`). Al visitarla, `Page.ViaNoFollow` refleja la
+   marca y `Stats.ViaNoFollow` la cuenta. Las URLs de la semilla, de sitemaps
+   y de redirecciones nunca son «vía nofollow». Condición anterior (para
+   contexto): «en ámbito, no nofollow, y `p.NoFollow == false`, con
    `p.Depth+1 <= MaxDepth` → Push(depth+1). `RedirectTo` en ámbito →
    Push(misma profundidad). `Canonical` no se encola.
 7. URL prohibida por robots → `Page{Blocked:true, Status:0}` al Sink, no cuenta
@@ -288,6 +314,15 @@ sí misma; el motor la protege con un mutex.
 - SameSite: www, subdominios con y sin flag, host distinto.
 - ParseRobots: grupos por token y `*`, longest-match, Allow en empate, `*`/`$`,
   Crawl-delay, Sitemap, Disallow vacío, fichero vacío.
+- ParseRobotsDirectives: `noindex`, `nofollow`, `none`, `NOINDEX, NOFOLLOW`,
+  prefijo de agente que coincide / no coincide / `*`, vacío.
+- HTTPFetcher: `Response.XRobotsTag` con una y con dos cabeceras.
+- Run: página con `X-Robots-Tag: nofollow` (HTML y PDF) no aporta enlaces sin
+  `FollowNoFollow`; con `FollowNoFollow` se siguen enlaces nofollow y páginas
+  nofollow, `Page.ViaNoFollow` true solo en las URLs alcanzadas únicamente por
+  nofollow (una URL con un enlace nofollow y otro normal → false, en cualquier
+  orden de descubrimiento), `Stats.ViaNoFollow` correcto; los enlaces siguen
+  guardándose con `NoFollow: true`.
 - ParseHTML: base href, canonical, meta robots, nofollow, esquemas descartados,
   dedupe, texto de ancla, ausencia de title.
 - Frontier: dedupe y orden FIFO.

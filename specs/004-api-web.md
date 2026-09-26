@@ -49,9 +49,15 @@ interno"]}`.
   "user_agent": "EANBot/0.1 (+https://xavi.net)",
   "include_subdomains": false, "ignore_robots": false, "use_sitemaps": true,
   "headers": {"x-crawler-token": "XXXXXXXX"},
-  "origin": "203.0.113.10", "insecure_tls": false
+  "origin": "203.0.113.10", "insecure_tls": false,
+  "follow_nofollow": false
 }
 ```
+
+`follow_nofollow` (bool, por defecto `false`): seguir también los enlaces
+`rel=nofollow` y los de páginas con `nofollow` (meta o `X-Robots-Tag`). Los
+enlaces se guardan igual con `nofollow: true`; las páginas alcanzadas solo así
+llevan `via_nofollow: true`.
 
 `origin` (`ip` o `ip:puerto`, opcional) conecta directamente al servidor de
 origen para el host de la semilla, saltando Cloudflare, manteniendo `Host` y
@@ -127,6 +133,9 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      formato `Nombre: valor`; líneas vacías ignoradas; una línea sin `:` se
      rechaza en cliente con el mensaje «cabecera sin “:” en la línea N»).
      Se envía como objeto `headers`. Campo «IP del origen (saltar
+     Cloudflare)». Checkbox «Seguir enlaces nofollow» (`follow_nofollow`, siempre
+     enviado; ayuda: «Googlebot los trata como pista; para auditar todo lo
+     enlazado»). Campo «IP del origen (saltar
      Cloudflare)» (`type="text"`, placeholder `203.0.113.10`, ayuda: «ip o
      ip:puerto; la cabecera Host y el SNI siguen siendo los del sitio») que se
      envía como `origin` solo si no está vacío, y checkbox «No verificar el
@@ -137,7 +146,9 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      → «la petición ha fallado». Al crear, navega a `#/crawls/{id}`.
   3. **Detalle de rastreo** (`#/crawls/{id}`): cabecera (semilla, estado,
      botón cancelar si running), tarjetas de resumen (total, 2xx, 3xx, 4xx,
-     5xx, errores, bloqueadas, noindex), pestañas «Páginas», «Enlaces rotos» e «Informe» (esta última según
+     5xx, errores, bloqueadas, noindex, y «solo vía nofollow» si el rastreo
+     tiene `follow_nofollow`), filtro de estado con la opción «Solo vía
+     nofollow» (`status=via_nofollow`), pestañas «Páginas», «Enlaces rotos» e «Informe» (esta última según
      `specs/008-informe.md`). Páginas: filtro por estado (select), búsqueda (input con
      debounce 300 ms), tabla (código, URL, título, tipo, profundidad, ms) con
      paginación (100 por página); clic en fila → `#/crawls/{id}/pages/{pid}`.
@@ -148,7 +159,8 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
      muestra `origen: <ip>` si `config.origin` no está vacío y `tls sin
      verificar` si `config.insecure_tls`.
   4. **Detalle de página**: todos los campos de `page` en una lista de
-     definición; enlaces salientes (URL, texto, nofollow, en ámbito) y
+     definición (incluidos `x_robots_tag` y `via_nofollow`, este último como
+     «Sí, descubierta solo por enlaces nofollow» / «No»); enlaces salientes (URL, texto, nofollow, en ámbito) y
      entrantes (URL origen, texto), cada lista con su cabecera «N de total»
      y, si `total > N`, una nota «mostrando los primeros N».
 - Cualquier cambio de filtro limpia resultados obsoletos antes de pedir.
@@ -157,7 +169,7 @@ placeholder mínimo (`<div id="app"></div>` y texto «eanbot») para que
 
 healthz; el summary del crawl terminado coincide con las páginas servidas por el Fetcher falso aunque el rastreo termine antes de 1 s (el Close del BatchWriter vuelca lo pendiente antes de FinishCrawl); POST con `headers` → el Fetcher falso recibe la cabecera en cada
 petición (el `NewFetcher` inyectado recibe la `Config` con `Headers`) y el
-config almacenado la incluye; POST con cabecera inválida → 400; POST con `origin` e `insecure_tls` → el
+config almacenado la incluye; POST con cabecera inválida → 400; POST con `follow_nofollow` → la Config del Fetcher inyectado lo lleva y el config almacenado también (`false` si no viene); `/pages?status=via_nofollow`; POST con `origin` e `insecure_tls` → el
 Fetcher inyectado recibe la Config con ambos y el config almacenado los
 incluye (y `"origin":"","insecure_tls":false` cuando no vienen); POST con
 `origin` inválido → 400 `origin no válido: "..."`; POST válido → 201 y crawl en store, y tras esperar a que termine
