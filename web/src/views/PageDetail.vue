@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { errorsOf, getPage } from '../api.js'
-import { formatBool, formatBytes, formatDateTime, formatNumber, orDash } from '../format.js'
+import { formatBool, formatBytes, formatDateTime, formatNumber, orDash, viaNofollowLabel } from '../format.js'
 import { crawlHref, pageHref } from '../router.js'
 import ErrorList from '../components/ErrorList.vue'
 import StatusCode from '../components/StatusCode.vue'
@@ -118,6 +118,9 @@ onMounted(load)
           <dt>Meta robots</dt>
           <dd>{{ orDash(page.meta_robots) }}</dd>
 
+          <dt>X-Robots-Tag</dt>
+          <dd>{{ orDash(page.x_robots_tag) }}</dd>
+
           <dt>Noindex</dt>
           <dd>{{ formatBool(page.noindex) }}</dd>
 
@@ -126,6 +129,9 @@ onMounted(load)
 
           <dt>Redirige a</dt>
           <dd class="mono">{{ orDash(page.redirect_to) }}</dd>
+
+          <dt>Vía nofollow</dt>
+          <dd>{{ viaNofollowLabel(page.via_nofollow) }}</dd>
 
           <dt>Bloqueada</dt>
           <dd>{{ formatBool(page.blocked) }}</dd>

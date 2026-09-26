@@ -31,9 +31,14 @@ para que Cloudflare no bloquee al bot), `-origin ip[:puerto]` (conecta
 directamente al servidor de origen del host de la semilla, saltando Cloudflare;
 `Host` y SNI siguen siendo los del sitio, como `curl --resolve`),
 `-insecure-tls` (no verificar el certificado, para Origin CA de Cloudflare o
-certificados propios), `-json`, `-quiet`. `Ctrl-C` cancela y guarda lo
+certificados propios), `-follow-nofollow` (seguir también los enlaces
+`rel=nofollow` y los de páginas con `nofollow` en meta o `X-Robots-Tag`; las
+páginas alcanzables solo así se marcan «vía nofollow»), `-json`, `-quiet`. `Ctrl-C` cancela y guarda lo
 rastreado. En la API y la web, esas opciones van en `config.headers`,
-`config.origin` y `config.insecure_tls`.
+`config.origin`, `config.insecure_tls` y `config.follow_nofollow`.
+
+La cabecera `X-Robots-Tag` se lee en cualquier tipo de contenido (también PDF)
+y se combina con `<meta name="robots">` para `noindex` y `nofollow`.
 
 ```sh
 ./bin/eanbot crawl https://www.ejemplo.com \

@@ -561,6 +561,132 @@ func TestPostCrawl_InvalidOrigin(t *testing.T) {
 	}
 }
 
+func TestPostCrawl_FollowNoFollowPassedToFetcherAndStored(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://follow.example/", htmlResponse(`<a href="/a" rel="nofollow">a</a>`))
+	f.set("https://follow.example/a", htmlResponse(``))
+
+	st := newTestStore(t)
+	var gotCfg crawler.Config
+	factory := func(cfg crawler.Config) crawler.Fetcher {
+		gotCfg = cfg
+		return f
+	}
+	srv := New(st, Options{NewFetcher: factory})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	})
+	h := srv.Handler()
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":            "https://follow.example/",
+		"follow_nofollow": true,
+		"delay_ms":        0,
+		"concurrency":     1,
+		"ignore_robots":   true,
+		"use_sitemaps":    false,
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	if !gotCfg.FollowNoFollow {
+		t.Error("NewFetcher received Config.FollowNoFollow = false, want true")
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["follow_nofollow"] != true {
+		t.Errorf("stored follow_nofollow = %v, want true", cfg["follow_nofollow"])
+	}
+
+	// The nofollow-only link must have been followed (FollowNoFollow) and
+	// the resulting page marked via_nofollow, retrievable through the
+	// dedicated status filter.
+	w = doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/pages?status=via_nofollow", crawl.ID), nil)
+	body := decodeJSON[pagesBody](t, w)
+	if body.Total != 1 {
+		t.Fatalf("via_nofollow total = %d, want 1, body = %+v", body.Total, body)
+	}
+	if len(body.Pages) != 1 || !strings.HasSuffix(body.Pages[0].URL, "/a") || !body.Pages[0].ViaNoFollow {
+		t.Errorf("pages = %+v, want a single /a page with ViaNoFollow=true", body.Pages)
+	}
+}
+
+func TestPostCrawl_FollowNoFollowAbsentStoredAsFalse(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://nofollowabsent.example/", statusResponse(200))
+	_, h := newTestServer(t, f)
+
+	reqBody := mustJSON(t, map[string]any{"seed": "https://nofollowabsent.example/"})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	crawl := decodeJSON[store.Crawl](t, w)
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["follow_nofollow"] != false {
+		t.Errorf("stored follow_nofollow = %v, want false", cfg["follow_nofollow"])
+	}
+}
+
+// TestPostCrawl_RecomputeViaNoFollowFixesOverapproximation reproduces the
+// crawl engine's via_nofollow overapproximation under BFS ordering (see
+// "sobreaproximación" in specs/002-crawler.md): the seed links to /hidden via
+// rel=nofollow *before* it links normally to /via, so with Concurrency 1
+// /hidden is popped, fetched and marked via_nofollow before /via (which also
+// links normally to /hidden) is even fetched -- the engine never revisits
+// /hidden to clear the mark. The Manager must call store.RecomputeViaNoFollow
+// after the crawl finishes so the stored via_nofollow ends up false.
+func TestPostCrawl_RecomputeViaNoFollowFixesOverapproximation(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://recompute.example/", htmlResponse(
+		`<a href="/hidden" rel="nofollow">hidden</a><a href="/via">via</a>`))
+	f.set("https://recompute.example/hidden", htmlResponse(``))
+	f.set("https://recompute.example/via", htmlResponse(`<a href="/hidden">hidden</a>`))
+
+	_, h := newTestServer(t, f)
+
+	reqBody := mustJSON(t, map[string]any{
+		"seed":            "https://recompute.example/",
+		"follow_nofollow": true,
+		"delay_ms":        0,
+		"concurrency":     1,
+		"ignore_robots":   true,
+		"use_sitemaps":    false,
+	})
+	w := doRequest(h, http.MethodPost, "/api/crawls", reqBody)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", w.Code, w.Body.String())
+	}
+	crawl := decodeJSON[store.Crawl](t, w)
+	waitUntilDone(t, h, crawl.ID, 5*time.Second)
+
+	w = doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d", crawl.ID), nil)
+	detail := decodeJSON[crawlDetail](t, w)
+	if detail.Summary.ViaNoFollow != 0 {
+		t.Errorf("Summary.ViaNoFollow = %d, want 0 after RecomputeViaNoFollow", detail.Summary.ViaNoFollow)
+	}
+
+	w = doRequest(h, http.MethodGet, fmt.Sprintf("/api/crawls/%d/pages?status=via_nofollow", crawl.ID), nil)
+	body := decodeJSON[pagesBody](t, w)
+	if body.Total != 0 || len(body.Pages) != 0 {
+		t.Errorf("via_nofollow pages = %+v (total %d), want none", body.Pages, body.Total)
+	}
+}
+
 // TestDefaultNewFetcherAppliesOrigin exercises the real (non-injected)
 // NewFetcher built by New when Options.NewFetcher is nil: it must build an
 // HTTPFetcher whose Origin/InsecureTLS come from the crawl's Config and

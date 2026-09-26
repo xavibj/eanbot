@@ -380,6 +380,151 @@ func TestCrawlSuccessAndSummary(t *testing.T) {
 	}
 }
 
+// newNoFollowServer builds an httptest.Server whose home page links to
+// /hidden only through a rel=nofollow anchor: without -follow-nofollow the
+// crawl must never fetch /hidden; with it, /hidden is fetched and counted as
+// "via nofollow".
+func newNoFollowServer() *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/hidden" rel="nofollow">hidden</a></body></html>`)
+	})
+	mux.HandleFunc("/hidden", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>hidden</body></html>`)
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestCrawlFollowNoFollowFlag(t *testing.T) {
+	srv := newNoFollowServer()
+	defer srv.Close()
+	dbPath := tempDBPath(t)
+
+	code, stdout, stderr := runCrawl(t, srv, dbPath, "-ignore-robots", "-follow-nofollow", "-quiet")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Páginas: 2") {
+		t.Errorf("stdout missing page count: %q", stdout)
+	}
+	if !strings.Contains(stdout, "Solo vía nofollow: 1") {
+		t.Errorf("stdout missing 'Solo vía nofollow' line: %q", stdout)
+	}
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	defer st.Close()
+
+	crawl, err := st.GetCrawl(1)
+	if err != nil {
+		t.Fatalf("GetCrawl() error = %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(crawl.Config, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg["follow_nofollow"] != true {
+		t.Errorf("stored follow_nofollow = %v, want true", cfg["follow_nofollow"])
+	}
+
+	pages, total, err := st.ListPages(1, store.PageFilter{Status: "via_nofollow"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 1 || len(pages) != 1 {
+		t.Fatalf("via_nofollow total = %d len = %d, want 1", total, len(pages))
+	}
+	if !strings.HasSuffix(pages[0].URL, "/hidden") || !pages[0].ViaNoFollow {
+		t.Errorf("via_nofollow page = %+v, want /hidden with ViaNoFollow=true", pages[0])
+	}
+
+	// "pages -status via_nofollow" must expose the same page, with a VÍA
+	// column reading "nofollow".
+	var pagesOut, pagesErr bytes.Buffer
+	pcode := runCtx(context.Background(), []string{"pages", "1", "-db", dbPath, "-status", "via_nofollow"}, &pagesOut, &pagesErr)
+	if pcode != 0 {
+		t.Fatalf("pages code = %d, want 0, stderr = %s", pcode, pagesErr.String())
+	}
+	if !strings.Contains(pagesOut.String(), "VÍA") {
+		t.Errorf("pages table missing VÍA header: %q", pagesOut.String())
+	}
+	if !strings.Contains(pagesOut.String(), "nofollow") {
+		t.Errorf("pages table missing nofollow marker: %q", pagesOut.String())
+	}
+}
+
+func TestCrawlWithoutFollowNoFollowFlag(t *testing.T) {
+	srv := newNoFollowServer()
+	defer srv.Close()
+	dbPath := tempDBPath(t)
+
+	code, stdout, stderr := runCrawl(t, srv, dbPath, "-ignore-robots", "-quiet")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Páginas: 1") {
+		t.Errorf("stdout missing page count: %q", stdout)
+	}
+	if strings.Contains(stdout, "Solo vía nofollow") {
+		t.Errorf("stdout should not mention 'Solo vía nofollow' without -follow-nofollow: %q", stdout)
+	}
+}
+
+// newRecomputeServer builds an httptest.Server reproducing the crawl
+// engine's via_nofollow overapproximation under BFS ordering (see
+// "sobreaproximación" in specs/002-crawler.md): the home page links to
+// /hidden via rel=nofollow *before* it links normally to /via, so with
+// Concurrency 1 /hidden is popped and visited (and marked via_nofollow)
+// before /via -- which also links normally to /hidden -- is ever fetched.
+func newRecomputeServer() *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/hidden" rel="nofollow">hidden</a><a href="/via">via</a></body></html>`)
+	})
+	mux.HandleFunc("/hidden", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>hidden</body></html>`)
+	})
+	mux.HandleFunc("/via", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/hidden">hidden</a></body></html>`)
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestCrawlRecomputeViaNoFollowFixesOverapproximation(t *testing.T) {
+	srv := newRecomputeServer()
+	defer srv.Close()
+	dbPath := tempDBPath(t)
+
+	code, stdout, stderr := runCrawl(t, srv, dbPath, "-ignore-robots", "-follow-nofollow", "-quiet")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Solo vía nofollow: 0") {
+		t.Errorf("stdout should report 'Solo vía nofollow: 0' after RecomputeViaNoFollow: %q", stdout)
+	}
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	defer st.Close()
+
+	pages, total, err := st.ListPages(1, store.PageFilter{Status: "via_nofollow"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 0 || len(pages) != 0 {
+		t.Errorf("via_nofollow pages = %+v (total %d), want none", pages, total)
+	}
+}
+
 func TestCrawlProgressLines(t *testing.T) {
 	srv := newCrawlServer()
 	defer srv.Close()

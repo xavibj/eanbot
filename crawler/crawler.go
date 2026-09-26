@@ -25,8 +25,10 @@ type Page struct {
 	Description string
 	Canonical   string // absolute, normalized; "" if none
 	MetaRobots  string // raw <meta name="robots"> content
-	NoIndex     bool
-	NoFollow    bool // meta robots nofollow
+	XRobotsTag  string // raw X-Robots-Tag header (any content type, PDF included)
+	NoIndex     bool   // meta robots OR X-Robots-Tag (see ParseRobotsDirectives)
+	NoFollow    bool   // meta robots OR X-Robots-Tag (see ParseRobotsDirectives)
+	ViaNoFollow bool   // the URL was discovered only through nofollow links (can only be true with FollowNoFollow)
 	H1          string
 	RedirectTo  string // absolute, normalized, if 3xx with Location
 	Error       string // "" if ok; text of the network/read error
@@ -48,6 +50,7 @@ type Stats struct {
 	RobotsTxt                string
 	RobotsError              string // why robots.txt could not be applied ("" when it was fetched)
 	Sitemaps                 int    // URLs discovered via sitemaps
+	ViaNoFollow              int    // pages visited that were discovered only through nofollow links
 	FinalHost                string // effective scope host, after following any seed-level cross-host redirect chain
 }
 
@@ -109,6 +112,7 @@ func Run(ctx context.Context, cfg Config, f Fetcher, s Sink) (Stats, error) {
 	stats.Fetched = state.fetched
 	stats.Blocked = state.blocked
 	stats.Errors = state.errs
+	stats.ViaNoFollow = state.viaNoFollow
 	stats.Queued = fr.Len()
 
 	if ctx.Err() != nil {
@@ -275,12 +279,13 @@ func resolveRobots(ctx context.Context, cfg Config, f Fetcher, su *url.URL, stat
 
 // engineState is the mutable state shared by every worker goroutine.
 type engineState struct {
-	mu       sync.Mutex
-	fr       *Frontier
-	fetched  int
-	blocked  int
-	errs     int
-	inFlight int
+	mu          sync.Mutex
+	fr          *Frontier
+	fetched     int
+	blocked     int
+	errs        int
+	viaNoFollow int
+	inFlight    int
 }
 
 // runWorker pops URLs off the shared frontier until it is empty, MaxPages
@@ -299,7 +304,7 @@ func runWorker(ctx context.Context, cfg Config, f Fetcher, s Sink, robots *Robot
 			st.mu.Unlock()
 			return
 		}
-		u, depth, ok := st.fr.Pop()
+		u, depth, viaNoFollow, ok := st.fr.Pop()
 		if !ok {
 			st.mu.Unlock()
 			return
@@ -316,12 +321,16 @@ func runWorker(ctx context.Context, cfg Config, f Fetcher, s Sink, robots *Robot
 		st.mu.Unlock()
 
 		page := fetchAndBuildPage(ctx, cfg, f, seedHost, u, depth, limiter)
+		page.ViaNoFollow = viaNoFollow
 
 		st.mu.Lock()
 		st.inFlight--
 		st.fetched++
 		if page.Error != "" {
 			st.errs++
+		}
+		if page.ViaNoFollow {
+			st.viaNoFollow++
 		}
 		if !page.Blocked {
 			enqueueLinks(page, cfg, seedHost, st.fr)
@@ -357,6 +366,13 @@ func fetchAndBuildPage(ctx context.Context, cfg Config, f Fetcher, seedHost stri
 	page.Size = resp.Size
 	page.Duration = resp.Duration
 	page.ContentType = mediaType(resp.ContentType)
+	page.XRobotsTag = resp.XRobotsTag
+
+	// The X-Robots-Tag header applies regardless of content type (HTML,
+	// PDF, or anything else); Page.NoIndex/NoFollow end up being the OR of
+	// this and, for HTML pages, the <meta name="robots"> directives merged
+	// in below.
+	page.NoIndex, page.NoFollow = ParseRobotsDirectives(resp.XRobotsTag, cfg.RobotsToken)
 
 	if resp.Status >= 300 && resp.Status < 400 {
 		if resp.Location != "" {
@@ -377,8 +393,8 @@ func fetchAndBuildPage(ctx context.Context, cfg Config, f Fetcher, seedHost stri
 				page.Description = extracted.Description
 				page.Canonical = extracted.Canonical
 				page.MetaRobots = extracted.MetaRobots
-				page.NoIndex = extracted.NoIndex
-				page.NoFollow = extracted.NoFollow
+				page.NoIndex = page.NoIndex || extracted.NoIndex
+				page.NoFollow = page.NoFollow || extracted.NoFollow
 				page.H1 = extracted.H1
 				page.Links = extracted.Links
 			}
@@ -406,15 +422,35 @@ func mediaType(contentType string) string {
 
 // enqueueLinks pushes a fetched page's outbound links and redirect target
 // into the frontier, honouring scope, nofollow and MaxDepth.
+//
+// A link is skipped entirely (recorded on page.Links, per ParseHTML, but
+// never queued) when it is nofollow itself, or the page it was found on is
+// nofollow, and cfg.FollowNoFollow is false. Otherwise it is queued: via
+// PushNoFollow (marking it "discovered via nofollow") when it is only
+// reachable through a nofollow link or page, or via plain Push when a
+// normal path to it exists. If a later normal-path Push fails because the
+// URL is already queued, its nofollow mark (if any, from an earlier
+// nofollow-only discovery) is cleared, per specs/002-crawler.md. The
+// redirect target, like the seed and sitemap URLs, is never pushed as
+// "via nofollow".
 func enqueueLinks(page Page, cfg Config, seedHost string, fr *Frontier) {
 	if page.Error != "" {
 		return
 	}
 
-	if !page.NoFollow && page.Depth+1 <= cfg.MaxDepth {
+	if page.Depth+1 <= cfg.MaxDepth {
 		for _, l := range page.Links {
-			if l.InScope && !l.NoFollow {
-				fr.Push(l.URL, page.Depth+1)
+			if !l.InScope {
+				continue
+			}
+			viaNoFollow := l.NoFollow || page.NoFollow
+			if viaNoFollow && !cfg.FollowNoFollow {
+				continue
+			}
+			if viaNoFollow {
+				fr.PushNoFollow(l.URL, page.Depth+1)
+			} else if !fr.Push(l.URL, page.Depth+1) {
+				fr.ClearNoFollow(l.URL)
 			}
 		}
 	}
@@ -422,7 +458,9 @@ func enqueueLinks(page Page, cfg Config, seedHost string, fr *Frontier) {
 	if page.RedirectTo != "" {
 		if pu, err := url.Parse(page.RedirectTo); err == nil {
 			if SameSite(seedHost, pu.Hostname(), cfg.IncludeSubdomains) {
-				fr.Push(page.RedirectTo, page.Depth)
+				if !fr.Push(page.RedirectTo, page.Depth) {
+					fr.ClearNoFollow(page.RedirectTo)
+				}
 			}
 		}
 	}

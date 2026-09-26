@@ -82,6 +82,11 @@ export function formatBool(value) {
   return value ? 'sí' : 'no'
 }
 
+// viaNofollow pages were only reachable through rel=nofollow links.
+export function viaNofollowLabel(value) {
+  return value ? 'Sí, descubierta solo por enlaces nofollow' : 'No'
+}
+
 export function orDash(value) {
   const raw = String(value ?? '')
   return raw === '' ? '—' : raw

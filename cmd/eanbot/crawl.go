@@ -46,6 +46,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	quiet := fs.Bool("quiet", false, "no mostrar el progreso en stderr")
 	origin := fs.String("origin", "", "IP (o ip:puerto) del servidor de origen, saltando Cloudflare (Host y SNI intactos)")
 	insecureTLS := fs.Bool("insecure-tls", false, "no verificar el certificado TLS")
+	followNoFollow := fs.Bool("follow-nofollow", false, "seguir también los enlaces rel=nofollow y los de páginas con nofollow")
 
 	headers := map[string]string{}
 	fs.Func("header", `cabecera adicional "Nombre: valor" para todas las peticiones (repetible)`, func(v string) error {
@@ -86,6 +87,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		Headers:           headers,
 		Origin:            *origin,
 		InsecureTLS:       *insecureTLS,
+		FollowNoFollow:    *followNoFollow,
 	}
 
 	if errs := cfg.Validate(); len(errs) > 0 {
@@ -139,6 +141,15 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "error: guardando páginas: %v\n", werr)
 	}
 
+	// The engine's via_nofollow mark is an overapproximation under
+	// concurrency (see specs/002-crawler.md): fix it up now that every page
+	// and link of the crawl has landed, before the crawl is reported done.
+	if cfg.FollowNoFollow {
+		if _, rerr := st.RecomputeViaNoFollow(crawl.ID); rerr != nil {
+			fmt.Fprintf(stderr, "error: recalculando via_nofollow: %v\n", rerr)
+		}
+	}
+
 	if serr := st.SetRobots(crawl.ID, stats.RobotsTxt); serr != nil {
 		fmt.Fprintf(stderr, "error: guardando robots.txt: %v\n", serr)
 	}
@@ -177,7 +188,7 @@ func cmdCrawl(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if *jsonOutput {
 		printCrawlJSON(stdout, finished, summary, stats)
 	} else {
-		printCrawlSummary(stdout, finished, summary, stats, brokenTotal)
+		printCrawlSummary(stdout, finished, summary, stats, brokenTotal, cfg.FollowNoFollow)
 	}
 
 	switch status {
@@ -222,6 +233,8 @@ func (sk *progressSink) Page(p crawler.Page) {
 		Description: p.Description,
 		Canonical:   p.Canonical,
 		MetaRobots:  p.MetaRobots,
+		XRobotsTag:  p.XRobotsTag,
+		ViaNoFollow: p.ViaNoFollow,
 		NoIndex:     p.NoIndex,
 		NoFollow:    p.NoFollow,
 		H1:          p.H1,
@@ -285,6 +298,7 @@ type crawlConfigDoc struct {
 	Headers           map[string]string `json:"headers"`
 	Origin            string            `json:"origin"`
 	InsecureTLS       bool              `json:"insecure_tls"`
+	FollowNoFollow    bool              `json:"follow_nofollow"`
 }
 
 // crawlConfigJSON serializes cfg (already fully resolved from flags, no
@@ -309,18 +323,23 @@ func crawlConfigJSON(cfg crawler.Config) (json.RawMessage, error) {
 		Headers:           headers,
 		Origin:            cfg.Origin,
 		InsecureTLS:       cfg.InsecureTLS,
+		FollowNoFollow:    cfg.FollowNoFollow,
 	}
 	return json.Marshal(doc)
 }
 
 // printCrawlSummary writes the human-readable crawl summary, as fixed by
-// specs/005-cli.md.
-func printCrawlSummary(w io.Writer, c *store.Crawl, s *store.Summary, stats crawler.Stats, brokenCount int) {
+// specs/005-cli.md. The "Solo vía nofollow" line only appears when the crawl
+// was run with -follow-nofollow.
+func printCrawlSummary(w io.Writer, c *store.Crawl, s *store.Summary, stats crawler.Stats, brokenCount int, followNoFollow bool) {
 	fmt.Fprintf(w, "Rastreo #%d · %s · %s\n", c.ID, c.Seed, c.Status)
 	fmt.Fprintf(w, "Páginas: %d   2xx: %d   3xx: %d   4xx: %d   5xx: %d   Errores: %d   Bloqueadas: %d\n",
 		s.Total, s.Status2xx, s.Status3xx, s.Status4xx, s.Status5xx, s.Errors, s.Blocked)
 	fmt.Fprintf(w, "Noindex: %d   Profundidad máx.: %d   Media: %d ms   En cola sin visitar: %d\n",
 		s.NoIndex, s.MaxDepth, s.AvgDurationMs, stats.Queued)
+	if followNoFollow {
+		fmt.Fprintf(w, "Solo vía nofollow: %d\n", s.ViaNoFollow)
+	}
 	if brokenCount > 0 {
 		fmt.Fprintf(w, "Enlaces rotos: %d (ver: eanbot broken %d)\n", brokenCount, c.ID)
 	} else {

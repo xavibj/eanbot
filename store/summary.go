@@ -18,13 +18,13 @@ func (s *Store) Summarize(crawlID int64) (*Summary, error) {
 	var durSum, durN int64
 	row := s.r.QueryRow(
 		`SELECT pages_count, count_2xx, count_3xx, count_4xx, count_5xx, count_errors,
-			count_blocked, count_noindex, max_depth, duration_sum, duration_n
+			count_blocked, count_noindex, count_via_nofollow, max_depth, duration_sum, duration_n
 		 FROM crawls WHERE id = ?`,
 		crawlID,
 	)
 	if err := row.Scan(
 		&sum.Total, &sum.Status2xx, &sum.Status3xx, &sum.Status4xx, &sum.Status5xx,
-		&sum.Errors, &sum.Blocked, &sum.NoIndex, &sum.MaxDepth, &durSum, &durN,
+		&sum.Errors, &sum.Blocked, &sum.NoIndex, &sum.ViaNoFollow, &sum.MaxDepth, &durSum, &durN,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -113,7 +113,7 @@ func (s *Store) brokenPages(crawlID int64, limit, offset int) ([]BrokenPage, int
 
 	rows, err := s.r.Query(
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at,
 			(SELECT COUNT(*) FROM links l WHERE l.crawl_id = p.crawl_id AND l.to_url = p.url) AS referrers_count
 		 FROM pages p
@@ -136,20 +136,22 @@ func (s *Store) brokenPages(crawlID int64, limit, offset int) ([]BrokenPage, int
 	out := make([]BrokenPage, 0, capacity)
 	for rows.Next() {
 		var (
-			p          Page
-			noindex    int
-			nofollow   int
-			blocked    int
-			fetchedAtS string
-			refCount   int
+			p           Page
+			viaNoFollow int
+			noindex     int
+			nofollow    int
+			blocked     int
+			fetchedAtS  string
+			refCount    int
 		)
 		if err := rows.Scan(
 			&p.ID, &p.CrawlID, &p.URL, &p.Depth, &p.Status, &p.ContentType, &p.Size, &p.DurationMs,
-			&p.Title, &p.Description, &p.Canonical, &p.MetaRobots, &noindex, &nofollow,
+			&p.Title, &p.Description, &p.Canonical, &p.MetaRobots, &p.XRobotsTag, &viaNoFollow, &noindex, &nofollow,
 			&p.H1, &p.RedirectTo, &p.Error, &blocked, &fetchedAtS, &refCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("store: broken links for crawl %d: %w", crawlID, err)
 		}
+		p.ViaNoFollow = viaNoFollow != 0
 		p.NoIndex = noindex != 0
 		p.NoFollow = nofollow != 0
 		p.Blocked = blocked != 0

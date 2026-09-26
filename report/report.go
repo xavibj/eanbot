@@ -419,6 +419,9 @@ func sampleKeys(p store.Page) []string {
 	if p.NoIndex {
 		keys = append(keys, "noindex")
 	}
+	if p.ViaNoFollow {
+		keys = append(keys, "via_nofollow")
+	}
 	return keys
 }
 

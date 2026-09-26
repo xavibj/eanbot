@@ -32,6 +32,7 @@ type Config struct {
 	Headers           map[string]string // extra headers sent on ALL requests (pages, robots, sitemaps)
 	Origin            string            // "ip" or "ip:port" of the origin server (bypass Cloudflare); "" = normal DNS
 	InsecureTLS       bool              // skip TLS certificate verification (Cloudflare Origin CA, self-signed certs)
+	FollowNoFollow    bool              // default false: also follow rel=nofollow links and links found on nofollow pages (meta or X-Robots-Tag)
 }
 
 // Defaults returns the default configuration values, as fixed in

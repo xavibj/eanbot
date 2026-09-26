@@ -524,6 +524,51 @@ func TestBuild_SamplesAreDeterministicForAFixedSeed(t *testing.T) {
 	}
 }
 
+// TestBuild_ViaNoFollowSample checks that a page marked ViaNoFollow lands in
+// the "via_nofollow" Samples bucket, and that a crawl with no such page gets
+// no such key at all (exercised by TestBuild_Samples, which asserts the
+// exact set of keys on the base seeded crawl).
+func TestBuild_ViaNoFollowSample(t *testing.T) {
+	old := seed
+	seed = 20260917
+	t.Cleanup(func() { seed = old })
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "eanbot.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	cfg := json.RawMessage(`{"seed":"https://example.com/","follow_nofollow":true}`)
+	c, err := st.CreateCrawl("https://example.com/", cfg)
+	if err != nil {
+		t.Fatalf("CreateCrawl() error = %v", err)
+	}
+	fetchedAt := time.Date(2026, 9, 17, 9, 15, 0, 0, time.UTC)
+	batch := []store.PageWithLinks{
+		{Page: store.Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, ContentType: "text/html", FetchedAt: fetchedAt}},
+		{Page: store.Page{CrawlID: c.ID, URL: "https://example.com/hidden", Status: 200, ContentType: "text/html", ViaNoFollow: true, FetchedAt: fetchedAt}},
+	}
+	if _, err := st.AddPages(c.ID, batch); err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+	if err := st.FinishCrawl(c.ID, "done", ""); err != nil {
+		t.Fatalf("FinishCrawl() error = %v", err)
+	}
+
+	r, err := Build(context.Background(), st, c.ID)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if r.Summary.ViaNoFollow != 1 {
+		t.Errorf("Summary.ViaNoFollow = %d, want 1", r.Summary.ViaNoFollow)
+	}
+	got, ok := r.Samples["via_nofollow"]
+	if !ok || len(got) != 1 || got[0].URL != "https://example.com/hidden" {
+		t.Errorf("Samples[via_nofollow] = %v, want a single entry for /hidden", got)
+	}
+}
+
 func TestBuild_NotFound(t *testing.T) {
 	st, _ := seedStore(t)
 	if _, err := Build(context.Background(), st, 999); !errors.Is(err, store.ErrNotFound) {

@@ -688,6 +688,164 @@ func TestRunSitemapsUseFinalHostAfterSeedRedirect(t *testing.T) {
 	}
 }
 
+// xRobotsHeader builds a Response carrying an X-Robots-Tag header. Reuses
+// htmlResponse/textResponse's field layout directly since Response has no
+// constructor for headers.
+func xRobotsHeaderResponse(status int, contentType, xRobotsTag, body string) *Response {
+	return &Response{
+		Status:      status,
+		ContentType: contentType,
+		XRobotsTag:  xRobotsTag,
+		Body:        []byte(body),
+		Size:        int64(len(body)),
+	}
+}
+
+func TestRunXRobotsTagNoFollowHTMLBlocksLinksWithoutFollowNoFollow(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://example.com/", xRobotsHeaderResponse(200, "text/html", "nofollow", `<a href="/a">a</a>`))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.Fetched != 1 {
+		t.Errorf("Fetched = %d, want 1", stats.Fetched)
+	}
+	if f.callCount() != 1 {
+		t.Errorf("fetch calls = %d, want 1 (/a must never be fetched)", f.callCount())
+	}
+	pages := sink.all()
+	if len(pages) != 1 || !pages[0].NoFollow {
+		t.Fatalf("pages = %+v, want a single page with NoFollow=true", pages)
+	}
+}
+
+func TestRunXRobotsTagNoFollowPDFBlocksLinksWithoutFollowNoFollow(t *testing.T) {
+	f := newFakeFetcher()
+	// The header applies to any content type, including a PDF whose body
+	// (irrelevant here, never parsed as HTML) happens to contain an anchor.
+	f.set("https://example.com/doc.pdf", xRobotsHeaderResponse(200, "application/pdf", "nofollow", `<a href="/a">a</a>`))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/doc.pdf", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.Fetched != 1 {
+		t.Errorf("Fetched = %d, want 1", stats.Fetched)
+	}
+	pages := sink.all()
+	if len(pages) != 1 || !pages[0].NoFollow {
+		t.Fatalf("pages = %+v, want a single page with NoFollow=true", pages)
+	}
+}
+
+func TestRunFollowNoFollowFollowsNoFollowLinksAndPages(t *testing.T) {
+	f := newFakeFetcher()
+	f.set("https://example.com/", xRobotsHeaderResponse(200, "text/html", "nofollow", `<a href="/a">a</a>`))
+	f.set("https://example.com/a", htmlResponse(`<a href="/b" rel="nofollow">b</a>`))
+	f.set("https://example.com/b", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10, FollowNoFollow: true}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.Fetched != 3 {
+		t.Errorf("Fetched = %d, want 3", stats.Fetched)
+	}
+	if stats.ViaNoFollow != 2 {
+		t.Errorf("ViaNoFollow = %d, want 2 (a and b were only reachable via nofollow)", stats.ViaNoFollow)
+	}
+
+	byURL := map[string]Page{}
+	for _, p := range sink.all() {
+		byURL[p.URL] = p
+	}
+	if seed := byURL["https://example.com/"]; seed.ViaNoFollow {
+		t.Error("the seed must never be ViaNoFollow")
+	}
+	if a := byURL["https://example.com/a"]; !a.ViaNoFollow {
+		t.Error("/a (reached only via a nofollow page) should be ViaNoFollow")
+	}
+	if b := byURL["https://example.com/b"]; !b.ViaNoFollow {
+		t.Error("/b (reached only via a rel=nofollow anchor) should be ViaNoFollow")
+	}
+	// Links must still be recorded with NoFollow: true regardless of
+	// whether they were followed.
+	for _, l := range byURL["https://example.com/a"].Links {
+		if l.URL == "https://example.com/b" && !l.NoFollow {
+			t.Error("the link to /b should still be recorded with NoFollow=true")
+		}
+	}
+}
+
+func TestRunViaNoFollowFalseWhenNormalLinkArrivesAfterNoFollowLink(t *testing.T) {
+	// /shared is reachable from two depth-1 pages: /p1 (visited first in
+	// strict BFS order) links to it with rel=nofollow, /p2 (visited next)
+	// links to it normally. By the time /p2 is processed, /shared is still
+	// queued (it is behind /p2 in the FIFO), so the normal link must clear
+	// its nofollow-only mark before it is popped.
+	f := newFakeFetcher()
+	f.set("https://example.com/", htmlResponse(`<a href="/p1">p1</a><a href="/p2">p2</a>`))
+	f.set("https://example.com/p1", htmlResponse(`<a href="/shared" rel="nofollow">shared</a>`))
+	f.set("https://example.com/p2", htmlResponse(`<a href="/shared">shared</a>`))
+	f.set("https://example.com/shared", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10, FollowNoFollow: true}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.ViaNoFollow != 0 {
+		t.Errorf("ViaNoFollow = %d, want 0 (shared also has a normal path)", stats.ViaNoFollow)
+	}
+	pages := sink.all()
+	for _, p := range pages {
+		if p.URL == "https://example.com/shared" && p.ViaNoFollow {
+			t.Error("/shared should not be ViaNoFollow: a normal link also reaches it")
+		}
+	}
+}
+
+func TestRunViaNoFollowFalseWhenNoFollowLinkArrivesAfterNormalLink(t *testing.T) {
+	// The reverse order: /p1 (visited first) links to /shared normally,
+	// /p2 (visited next, while /shared is still queued) links to it with
+	// rel=nofollow. Still ViaNoFollow=false either way.
+	f := newFakeFetcher()
+	f.set("https://example.com/", htmlResponse(`<a href="/p1">p1</a><a href="/p2">p2</a>`))
+	f.set("https://example.com/p1", htmlResponse(`<a href="/shared">shared</a>`))
+	f.set("https://example.com/p2", htmlResponse(`<a href="/shared" rel="nofollow">shared</a>`))
+	f.set("https://example.com/shared", htmlResponse(``))
+
+	sink := &memorySink{}
+	cfg := Config{Seed: "https://example.com/", Concurrency: 1, IgnoreRobots: true, MaxPages: 10, MaxDepth: 10, FollowNoFollow: true}
+
+	stats, err := Run(context.Background(), cfg, f, sink)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stats.ViaNoFollow != 0 {
+		t.Errorf("ViaNoFollow = %d, want 0 (shared also has a normal path)", stats.ViaNoFollow)
+	}
+	pages := sink.all()
+	for _, p := range pages {
+		if p.URL == "https://example.com/shared" && p.ViaNoFollow {
+			t.Error("/shared should not be ViaNoFollow: a normal link also reaches it")
+		}
+	}
+}
+
 func TestRunTimeoutIsBoundedInPractice(t *testing.T) {
 	// Guard against accidental deadlocks in the worker pool: this must
 	// complete quickly.

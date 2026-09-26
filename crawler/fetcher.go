@@ -16,6 +16,7 @@ type Response struct {
 	Status      int
 	ContentType string // raw header value
 	Location    string // Location header, if the status is 3xx
+	XRobotsTag  string // X-Robots-Tag header(s), joined by ", " if there are several; "" if none
 	Body        []byte // at most MaxBodyBytes
 	Truncated   bool   // true if the body was cut short at MaxBodyBytes
 	Size        int64  // bytes read (== len(Body))
@@ -168,6 +169,7 @@ func (h *HTTPFetcher) Fetch(ctx context.Context, url string) (*Response, error) 
 		Status:      resp.StatusCode,
 		ContentType: resp.Header.Get("Content-Type"),
 		Location:    resp.Header.Get("Location"),
+		XRobotsTag:  strings.Join(resp.Header.Values("X-Robots-Tag"), ", "),
 		Body:        body,
 		Truncated:   truncated,
 		Size:        int64(len(body)),

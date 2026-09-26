@@ -104,6 +104,17 @@ func (m *manager) run(ctx context.Context, cancel context.CancelFunc, crawlID in
 		m.log.Printf("crawl %d: flush pages: %v", crawlID, werr)
 	}
 
+	// The engine's via_nofollow mark is an overapproximation under
+	// concurrency (see specs/002-crawler.md): fix it up now that every page
+	// and link of the crawl has landed, before the crawl is reported done.
+	if cfg.FollowNoFollow {
+		if cleared, rerr := m.st.RecomputeViaNoFollow(crawlID); rerr != nil {
+			m.log.Printf("crawl %d: recompute via_nofollow: %v", crawlID, rerr)
+		} else {
+			m.log.Printf("crawl %d: via_nofollow recalculado (%d limpiadas)", crawlID, cleared)
+		}
+	}
+
 	if serr := m.st.SetRobots(crawlID, stats.RobotsTxt); serr != nil {
 		m.log.Printf("crawl %d: set robots: %v", crawlID, serr)
 	}
@@ -212,6 +223,8 @@ func (sk *storeSink) Page(p crawler.Page) {
 		Description: p.Description,
 		Canonical:   p.Canonical,
 		MetaRobots:  p.MetaRobots,
+		XRobotsTag:  p.XRobotsTag,
+		ViaNoFollow: p.ViaNoFollow,
 		NoIndex:     p.NoIndex,
 		NoFollow:    p.NoFollow,
 		H1:          p.H1,
@@ -254,6 +267,7 @@ type configDoc struct {
 	Headers           map[string]string `json:"headers"`
 	Origin            string            `json:"origin"`
 	InsecureTLS       bool              `json:"insecure_tls"`
+	FollowNoFollow    bool              `json:"follow_nofollow"`
 }
 
 // configToCrawlerConfig converts a decoded request body into a
@@ -275,6 +289,7 @@ func configToCrawlerConfig(doc configDoc) crawler.Config {
 		Headers:           doc.Headers,
 		Origin:            doc.Origin,
 		InsecureTLS:       doc.InsecureTLS,
+		FollowNoFollow:    doc.FollowNoFollow,
 	}
 
 	if doc.DelayMs != nil {
@@ -316,6 +331,7 @@ func configToJSON(cfg crawler.Config) (json.RawMessage, error) {
 		Headers:           headers,
 		Origin:            cfg.Origin,
 		InsecureTLS:       cfg.InsecureTLS,
+		FollowNoFollow:    cfg.FollowNoFollow,
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

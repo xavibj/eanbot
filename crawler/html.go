@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net/url"
 	"strings"
-	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -65,13 +64,20 @@ func ParseHTML(body []byte, pageURL *url.URL, seedHost string, includeSub bool) 
 					if !robotsSet {
 						page.MetaRobots = content
 						robotsSet = true
-						for _, tok := range splitRobotsTokens(content) {
-							switch tok {
-							case "noindex":
-								page.NoIndex = true
-							case "nofollow":
-								page.NoFollow = true
-							}
+						// The meta tag has no crawler-token context of its
+						// own (ParseHTML is not handed the crawl's
+						// RobotsToken), so directives are parsed with an
+						// empty token: unprefixed directives always apply,
+						// same as before, and an agent-prefixed directive
+						// (e.g. "googlebot: noindex") also applies, since it
+						// cannot be told apart from "meant for us" without a
+						// token to compare against.
+						noindex, nofollow := ParseRobotsDirectives(content, "")
+						if noindex {
+							page.NoIndex = true
+						}
+						if nofollow {
+							page.NoFollow = true
 						}
 					}
 				}
@@ -204,16 +210,4 @@ func hasToken(s, token string) bool {
 		}
 	}
 	return false
-}
-
-// splitRobotsTokens splits a <meta name="robots"> content value into
-// lower-cased tokens, separated by commas and/or whitespace.
-func splitRobotsTokens(content string) []string {
-	fields := strings.FieldsFunc(content, func(r rune) bool {
-		return r == ',' || unicode.IsSpace(r)
-	})
-	for i, f := range fields {
-		fields[i] = strings.ToLower(strings.TrimSpace(f))
-	}
-	return fields
 }

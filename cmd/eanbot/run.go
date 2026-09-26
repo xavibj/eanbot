@@ -19,10 +19,10 @@ const usageText = `Uso:
                      [-concurrency 4] [-delay 500ms] [-timeout 15s]
                      [-user-agent UA] [-include-subdomains] [-ignore-robots]
                      [-no-sitemaps] [-header "Nombre: valor"]...
-                     [-origin ip[:puerto]] [-insecure-tls] [-json] [-quiet]
+                     [-origin ip[:puerto]] [-insecure-tls] [-follow-nofollow] [-json] [-quiet]
   eanbot serve       [-db eanbot.db] [-addr :8345]
   eanbot crawls      [-db eanbot.db] [-json]
-  eanbot pages <crawl-id> [-db eanbot.db] [-status 2xx|3xx|4xx|5xx|error|blocked] [-q texto] [-json]
+  eanbot pages <crawl-id> [-db eanbot.db] [-status 2xx|3xx|4xx|5xx|error|blocked|via_nofollow] [-q texto] [-json]
   eanbot broken <crawl-id> [-db eanbot.db] [-json]
   eanbot report <crawl-id> [-db eanbot.db] [-json] [-o fichero]
   eanbot version

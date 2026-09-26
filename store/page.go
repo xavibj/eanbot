@@ -48,9 +48,9 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 	pageStmt, err := tx.Prepare(
 		`INSERT INTO pages (
 			crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: add pages to crawl %d: %w", crawlID, err)
@@ -67,8 +67,8 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 
 	ids := make([]int64, 0, len(batch))
 	var (
-		c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth int
-		durSum, durN                                               int64
+		c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, cViaNoFollow, maxDepth int
+		durSum, durN                                                             int64
 	)
 	contentTypes := map[string]int{}
 
@@ -76,7 +76,7 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 		p := item.Page
 		res, err := pageStmt.Exec(
 			p.CrawlID, p.URL, p.Depth, p.Status, p.ContentType, p.Size, p.DurationMs,
-			p.Title, p.Description, p.Canonical, p.MetaRobots, boolToInt(p.NoIndex), boolToInt(p.NoFollow),
+			p.Title, p.Description, p.Canonical, p.MetaRobots, p.XRobotsTag, boolToInt(p.ViaNoFollow), boolToInt(p.NoIndex), boolToInt(p.NoFollow),
 			p.H1, p.RedirectTo, p.Error, boolToInt(p.Blocked), p.FetchedAt.UTC().Format(time.RFC3339Nano),
 		)
 		if err != nil {
@@ -114,6 +114,9 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 		if p.NoIndex {
 			cNoIndex++
 		}
+		if p.ViaNoFollow {
+			cViaNoFollow++
+		}
 		if p.Depth > maxDepth {
 			maxDepth = p.Depth
 		}
@@ -136,11 +139,12 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 			count_errors = count_errors + ?,
 			count_blocked = count_blocked + ?,
 			count_noindex = count_noindex + ?,
+			count_via_nofollow = count_via_nofollow + ?,
 			max_depth = MAX(max_depth, ?),
 			duration_sum = duration_sum + ?,
 			duration_n = duration_n + ?
 		 WHERE id = ?`,
-		len(batch), c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth, durSum, durN, crawlID,
+		len(batch), c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, cViaNoFollow, maxDepth, durSum, durN, crawlID,
 	); err != nil {
 		return nil, fmt.Errorf("store: update counters for crawl %d: %w", crawlID, err)
 	}
@@ -161,6 +165,65 @@ func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) 
 	return ids, nil
 }
 
+// RecomputeViaNoFollow fixes the crawl engine's via_nofollow overapproximation
+// under concurrency (see "sobreaproximación" in specs/002-crawler.md): with
+// Concurrency > 1, a worker can visit a URL before another worker processes a
+// normal (followable) link to that same URL, leaving it marked via_nofollow
+// even though it also has a followable inlink. It clears via_nofollow, in a
+// single UPDATE with a correlated EXISTS subquery, on every page of the crawl
+// that is marked but has at least one followable inlink -- a link with
+// nofollow = 0 from a page with nofollow = 0 (using the links_crawl_to
+// index) -- and adjusts crawls.count_via_nofollow by the number of rows
+// cleared, in one transaction on the write pool. It returns how many pages
+// were cleared, and ErrNotFound if the crawl does not exist.
+func (s *Store) RecomputeViaNoFollow(crawlID int64) (int, error) {
+	exists, err := s.crawlExists(crawlID)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, ErrNotFound
+	}
+
+	tx, err := s.w.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("store: recompute via_nofollow for crawl %d: %w", crawlID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	res, err := tx.Exec(
+		`UPDATE pages AS p SET via_nofollow = 0
+		 WHERE p.crawl_id = ? AND p.via_nofollow = 1
+		 AND EXISTS (
+			SELECT 1 FROM links l JOIN pages f ON f.id = l.from_page_id
+			WHERE l.crawl_id = ? AND l.to_url = p.url AND l.nofollow = 0 AND f.nofollow = 0
+		 )`,
+		crawlID, crawlID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: recompute via_nofollow for crawl %d: %w", crawlID, err)
+	}
+	cleared64, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: recompute via_nofollow for crawl %d: %w", crawlID, err)
+	}
+	cleared := int(cleared64)
+
+	if cleared > 0 {
+		if _, err := tx.Exec(
+			`UPDATE crawls SET count_via_nofollow = count_via_nofollow - ? WHERE id = ?`,
+			cleared, crawlID,
+		); err != nil {
+			return 0, fmt.Errorf("store: recompute via_nofollow for crawl %d: %w", crawlID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: recompute via_nofollow for crawl %d: %w", crawlID, err)
+	}
+	return cleared, nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -176,7 +239,7 @@ func boolToInt(b bool) int {
 func (s *Store) GetPage(crawlID, pageID int64) (*PageDetail, error) {
 	row := s.r.QueryRow(
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
 		 FROM pages WHERE crawl_id = ? AND id = ?`,
 		crawlID, pageID,
@@ -282,7 +345,7 @@ func (s *Store) linksToURL(crawlID int64, url string) ([]Link, int, error) {
 func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error) {
 	row := s.r.QueryRow(
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
 		 FROM pages WHERE crawl_id = ? AND url = ?`,
 		crawlID, url,
@@ -303,13 +366,14 @@ func (s *Store) FindPageByURL(crawlID int64, url string) (*Page, error) {
 // Query == "", since a plain COUNT(*) over pages does not scale to the
 // millions of rows a long crawl accumulates.
 var pageFilterCounterColumn = map[string]string{
-	"":        "pages_count",
-	"2xx":     "count_2xx",
-	"3xx":     "count_3xx",
-	"4xx":     "count_4xx",
-	"5xx":     "count_5xx",
-	"error":   "count_errors",
-	"blocked": "count_blocked",
+	"":             "pages_count",
+	"2xx":          "count_2xx",
+	"3xx":          "count_3xx",
+	"4xx":          "count_4xx",
+	"5xx":          "count_5xx",
+	"error":        "count_errors",
+	"blocked":      "count_blocked",
+	"via_nofollow": "count_via_nofollow",
 }
 
 // ListPages returns the pages of a crawl matching f, ordered by id, along
@@ -337,6 +401,8 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 		where = append(where, "status = 0 AND blocked = 0")
 	case "blocked":
 		where = append(where, "blocked = 1")
+	case "via_nofollow":
+		where = append(where, "via_nofollow = 1")
 	}
 
 	if f.Query != "" {
@@ -367,7 +433,7 @@ func (s *Store) ListPages(crawlID int64, f PageFilter) ([]Page, int, error) {
 	limit := clampLimit(f.Limit)
 
 	selectQuery := `SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
 		 FROM pages WHERE ` + whereClause + ` ORDER BY id LIMIT ? OFFSET ?`
 	selectArgs := append(append([]any{}, args...), limit, f.Offset)
@@ -403,19 +469,21 @@ func escapeLike(s string) string {
 
 func scanPage(row rowScanner) (*Page, error) {
 	var (
-		p          Page
-		noindex    int
-		nofollow   int
-		blocked    int
-		fetchedAtS string
+		p           Page
+		viaNoFollow int
+		noindex     int
+		nofollow    int
+		blocked     int
+		fetchedAtS  string
 	)
 	if err := row.Scan(
 		&p.ID, &p.CrawlID, &p.URL, &p.Depth, &p.Status, &p.ContentType, &p.Size, &p.DurationMs,
-		&p.Title, &p.Description, &p.Canonical, &p.MetaRobots, &noindex, &nofollow,
+		&p.Title, &p.Description, &p.Canonical, &p.MetaRobots, &p.XRobotsTag, &viaNoFollow, &noindex, &nofollow,
 		&p.H1, &p.RedirectTo, &p.Error, &blocked, &fetchedAtS,
 	); err != nil {
 		return nil, err
 	}
+	p.ViaNoFollow = viaNoFollow != 0
 	p.NoIndex = noindex != 0
 	p.NoFollow = nofollow != 0
 	p.Blocked = blocked != 0
@@ -449,7 +517,7 @@ func (s *Store) ForEachPage(ctx context.Context, crawlID int64, fn func(Page) er
 
 	rows, err := s.r.QueryContext(ctx,
 		`SELECT id, crawl_id, url, depth, status, content_type, size, duration_ms,
-			title, description, canonical, meta_robots, noindex, nofollow,
+			title, description, canonical, meta_robots, x_robots_tag, via_nofollow, noindex, nofollow,
 			h1, redirect_to, error, blocked, fetched_at
 		 FROM pages WHERE crawl_id = ? ORDER BY id`,
 		crawlID,

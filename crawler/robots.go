@@ -221,6 +221,40 @@ func matchRules(rules []robotsRule, path string) bool {
 	return bestAllow
 }
 
+// ParseRobotsDirectives interprets both the content of a <meta name="robots">
+// tag and the X-Robots-Tag header: comma-separated directives,
+// case-insensitive, recognizing noindex, nofollow and none (= both). A
+// directive may carry an agent prefix (the X-Robots-Tag format, e.g.
+// "googlebot: noindex"); it applies only when the prefix contains token
+// (case-insensitive) or is "*". A directive without a prefix always applies.
+func ParseRobotsDirectives(value, token string) (noindex, nofollow bool) {
+	token = strings.ToLower(strings.TrimSpace(token))
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		directive := strings.ToLower(part)
+		if idx := strings.IndexByte(part, ':'); idx >= 0 {
+			prefix := strings.ToLower(strings.TrimSpace(part[:idx]))
+			if prefix != "*" && !strings.Contains(prefix, token) {
+				continue
+			}
+			directive = strings.ToLower(strings.TrimSpace(part[idx+1:]))
+		}
+		switch directive {
+		case "noindex":
+			noindex = true
+		case "nofollow":
+			nofollow = true
+		case "none":
+			noindex = true
+			nofollow = true
+		}
+	}
+	return noindex, nofollow
+}
+
 // compileRobotsPattern turns a robots.txt path pattern (where "*" matches
 // any sequence of characters and a trailing "$" anchors the end of the
 // match) into a regular expression anchored at the start of the string.

@@ -32,6 +32,8 @@ type Page struct {
 	Description string    `json:"description"`
 	Canonical   string    `json:"canonical"`
 	MetaRobots  string    `json:"meta_robots"`
+	XRobotsTag  string    `json:"x_robots_tag"`
+	ViaNoFollow bool      `json:"via_nofollow"`
 	NoIndex     bool      `json:"noindex"`
 	NoFollow    bool      `json:"nofollow"`
 	H1          string    `json:"h1"`
@@ -69,6 +71,7 @@ type Summary struct {
 	Errors        int            `json:"errors"`
 	Blocked       int            `json:"blocked"`
 	NoIndex       int            `json:"noindex"`
+	ViaNoFollow   int            `json:"via_nofollow"`
 	ContentTypes  map[string]int `json:"content_types"`
 	MaxDepth      int            `json:"max_depth"`
 	AvgDurationMs int64          `json:"avg_duration_ms"`

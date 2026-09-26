@@ -153,6 +153,36 @@ Disallow: /shared/
 	}
 }
 
+func TestParseRobotsDirectives(t *testing.T) {
+	tests := []struct {
+		name         string
+		value        string
+		token        string
+		wantNoIndex  bool
+		wantNoFollow bool
+	}{
+		{name: "empty", value: "", token: "eanbot"},
+		{name: "noindex only", value: "noindex", token: "eanbot", wantNoIndex: true},
+		{name: "nofollow only", value: "nofollow", token: "eanbot", wantNoFollow: true},
+		{name: "none means both", value: "none", token: "eanbot", wantNoIndex: true, wantNoFollow: true},
+		{name: "uppercase and spacing", value: "NOINDEX, NOFOLLOW", token: "eanbot", wantNoIndex: true, wantNoFollow: true},
+		{name: "matching agent prefix", value: "eanbot: noindex", token: "eanbot", wantNoIndex: true},
+		{name: "matching agent prefix substring", value: "my-eanbot-crawler: nofollow", token: "eanbot", wantNoFollow: true},
+		{name: "non-matching agent prefix", value: "googlebot: noindex", token: "eanbot"},
+		{name: "wildcard agent prefix", value: "*: none", token: "eanbot", wantNoIndex: true, wantNoFollow: true},
+		{name: "mixed prefixed and unprefixed", value: "googlebot: noindex, nofollow", token: "eanbot", wantNoFollow: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			noindex, nofollow := ParseRobotsDirectives(tt.value, tt.token)
+			if noindex != tt.wantNoIndex || nofollow != tt.wantNoFollow {
+				t.Errorf("ParseRobotsDirectives(%q, %q) = (%v, %v), want (%v, %v)",
+					tt.value, tt.token, noindex, nofollow, tt.wantNoIndex, tt.wantNoFollow)
+			}
+		})
+	}
+}
+
 func TestAllowAllAndDisallowAll(t *testing.T) {
 	if !AllowAll().Allowed("eanbot", "/anything") {
 		t.Error("AllowAll should allow everything")

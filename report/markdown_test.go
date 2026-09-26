@@ -83,6 +83,22 @@ func TestMarkdown_EmptySectionsSayNoData(t *testing.T) {
 	}
 }
 
+func TestMarkdown_ViaNoFollowRowOnlyWithFollowNoFollowConfig(t *testing.T) {
+	r := snapshotReport(t)
+	r.Summary.ViaNoFollow = 3
+
+	withoutFlag := Markdown(r)
+	if strings.Contains(withoutFlag, "Solo vía nofollow") {
+		t.Errorf("Markdown should not mention 'Solo vía nofollow' without follow_nofollow in config:\n%s", withoutFlag)
+	}
+
+	r.Crawl.Config = []byte(`{"follow_nofollow":true}`)
+	withFlag := Markdown(r)
+	if !strings.Contains(withFlag, "| Solo vía nofollow | 3 |") {
+		t.Errorf("Markdown missing 'Solo vía nofollow' row with follow_nofollow in config:\n%s", withFlag)
+	}
+}
+
 func TestMarkdown_ThousandsSeparator(t *testing.T) {
 	r := snapshotReport(t)
 	r.Summary.Total = 1234567

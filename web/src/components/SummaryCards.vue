@@ -4,12 +4,14 @@ import { formatNumber } from '../format.js'
 
 const props = defineProps({
   summary: { type: Object, default: null },
+  // only crawls configured with follow_nofollow get the extra card
+  showViaNofollow: { type: Boolean, default: false },
 })
 
 const cards = computed(() => {
   const s = props.summary || {}
   const n = (v) => Number(v) || 0
-  return [
+  const cards = [
     { key: 'total', label: 'Total', value: n(s.total), tone: '' },
     { key: 's2', label: '2xx', value: n(s.status_2xx), tone: 'ok' },
     { key: 's3', label: '3xx', value: n(s.status_3xx), tone: 'info' },
@@ -19,6 +21,10 @@ const cards = computed(() => {
     { key: 'blk', label: 'Bloqueadas', value: n(s.blocked), tone: 'grey' },
     { key: 'nix', label: 'Noindex', value: n(s.noindex), tone: 'grey' },
   ]
+  if (props.showViaNofollow) {
+    cards.push({ key: 'vnf', label: 'Solo vía nofollow', value: n(s.via_nofollow), tone: 'grey' })
+  }
+  return cards
 })
 </script>
 

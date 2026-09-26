@@ -57,6 +57,7 @@ var schemaStatements = []string{
 		count_errors  INTEGER NOT NULL DEFAULT 0,
 		count_blocked INTEGER NOT NULL DEFAULT 0,
 		count_noindex INTEGER NOT NULL DEFAULT 0,
+		count_via_nofollow INTEGER NOT NULL DEFAULT 0,
 		max_depth     INTEGER NOT NULL DEFAULT 0,
 		duration_sum  INTEGER NOT NULL DEFAULT 0,
 		duration_n    INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +76,8 @@ var schemaStatements = []string{
 		description  TEXT NOT NULL DEFAULT '',
 		canonical    TEXT NOT NULL DEFAULT '',
 		meta_robots  TEXT NOT NULL DEFAULT '',
+		x_robots_tag TEXT NOT NULL DEFAULT '',
+		via_nofollow INTEGER NOT NULL DEFAULT 0,
 		noindex      INTEGER NOT NULL DEFAULT 0,
 		nofollow     INTEGER NOT NULL DEFAULT 0,
 		h1           TEXT NOT NULL DEFAULT '',
@@ -252,6 +255,9 @@ func (s *Store) init() error {
 	if err := s.migrateCrawlsColumns(); err != nil {
 		return err
 	}
+	if err := s.migratePagesColumns(); err != nil {
+		return err
+	}
 	if err := s.backfillCounters(); err != nil {
 		return err
 	}
@@ -281,6 +287,7 @@ var crawlCounterColumns = []struct {
 	{"count_errors", "ALTER TABLE crawls ADD COLUMN count_errors INTEGER NOT NULL DEFAULT 0"},
 	{"count_blocked", "ALTER TABLE crawls ADD COLUMN count_blocked INTEGER NOT NULL DEFAULT 0"},
 	{"count_noindex", "ALTER TABLE crawls ADD COLUMN count_noindex INTEGER NOT NULL DEFAULT 0"},
+	{"count_via_nofollow", "ALTER TABLE crawls ADD COLUMN count_via_nofollow INTEGER NOT NULL DEFAULT 0"},
 	{"max_depth", "ALTER TABLE crawls ADD COLUMN max_depth INTEGER NOT NULL DEFAULT 0"},
 	{"duration_sum", "ALTER TABLE crawls ADD COLUMN duration_sum INTEGER NOT NULL DEFAULT 0"},
 	{"duration_n", "ALTER TABLE crawls ADD COLUMN duration_n INTEGER NOT NULL DEFAULT 0"},
@@ -290,7 +297,7 @@ var crawlCounterColumns = []struct {
 // migrateCrawlsColumns adds any of crawlCounterColumns missing from an
 // existing crawls table.
 func (s *Store) migrateCrawlsColumns() error {
-	existing, err := s.crawlsColumnNames()
+	existing, err := s.tableColumnNames("crawls")
 	if err != nil {
 		return err
 	}
@@ -305,10 +312,13 @@ func (s *Store) migrateCrawlsColumns() error {
 	return nil
 }
 
-func (s *Store) crawlsColumnNames() (map[string]bool, error) {
-	rows, err := s.w.Query(`PRAGMA table_info(crawls)`)
+// tableColumnNames returns the set of column names table currently has, via
+// PRAGMA table_info. table is always one of the fixed literals "crawls" or
+// "pages", never caller input.
+func (s *Store) tableColumnNames(table string) (map[string]bool, error) {
+	rows, err := s.w.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return nil, fmt.Errorf("store: inspect crawls schema: %w", err)
+		return nil, fmt.Errorf("store: inspect %s schema: %w", table, err)
 	}
 	defer rows.Close()
 
@@ -320,14 +330,43 @@ func (s *Store) crawlsColumnNames() (map[string]bool, error) {
 			dflt             sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return nil, fmt.Errorf("store: inspect crawls schema: %w", err)
+			return nil, fmt.Errorf("store: inspect %s schema: %w", table, err)
 		}
 		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: inspect crawls schema: %w", err)
+		return nil, fmt.Errorf("store: inspect %s schema: %w", table, err)
 	}
 	return existing, nil
+}
+
+// pagesCounterColumns are the columns this version of eanbot adds to pages
+// (x_robots_tag, via_nofollow), added the same way as crawlCounterColumns:
+// via ALTER TABLE on a pre-existing table, skipped when already present.
+var pagesCounterColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"x_robots_tag", "ALTER TABLE pages ADD COLUMN x_robots_tag TEXT NOT NULL DEFAULT ''"},
+	{"via_nofollow", "ALTER TABLE pages ADD COLUMN via_nofollow INTEGER NOT NULL DEFAULT 0"},
+}
+
+// migratePagesColumns adds any of pagesCounterColumns missing from an
+// existing pages table.
+func (s *Store) migratePagesColumns() error {
+	existing, err := s.tableColumnNames("pages")
+	if err != nil {
+		return err
+	}
+	for _, col := range pagesCounterColumns {
+		if existing[col.name] {
+			continue
+		}
+		if _, err := s.w.Exec(col.ddl); err != nil {
+			return fmt.Errorf("store: add column %s to pages: %w", col.name, err)
+		}
+	}
+	return nil
 }
 
 // backfillCounters recomputes the summary counters (and crawl_content_types)
@@ -371,8 +410,8 @@ func (s *Store) backfillCrawlCounters(crawlID int64) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	var (
-		pagesCount, c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth int
-		durSum, durN                                                           int64
+		pagesCount, c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, cViaNoFollow, maxDepth int
+		durSum, durN                                                                         int64
 	)
 	row := tx.QueryRow(
 		`SELECT
@@ -384,6 +423,7 @@ func (s *Store) backfillCrawlCounters(crawlID int64) error {
 			COUNT(*) FILTER (WHERE status = 0 AND blocked = 0),
 			COUNT(*) FILTER (WHERE blocked = 1),
 			COUNT(*) FILTER (WHERE noindex = 1),
+			COUNT(*) FILTER (WHERE via_nofollow = 1),
 			COALESCE(MAX(depth), 0),
 			COALESCE(SUM(CASE WHEN status > 0 THEN duration_ms ELSE 0 END), 0),
 			COUNT(*) FILTER (WHERE status > 0)
@@ -391,7 +431,7 @@ func (s *Store) backfillCrawlCounters(crawlID int64) error {
 		crawlID,
 	)
 	if err := row.Scan(
-		&pagesCount, &c2xx, &c3xx, &c4xx, &c5xx, &cErr, &cBlocked, &cNoIndex, &maxDepth, &durSum, &durN,
+		&pagesCount, &c2xx, &c3xx, &c4xx, &c5xx, &cErr, &cBlocked, &cNoIndex, &cViaNoFollow, &maxDepth, &durSum, &durN,
 	); err != nil {
 		return fmt.Errorf("store: backfill counters for crawl %d: %w", crawlID, err)
 	}
@@ -399,10 +439,10 @@ func (s *Store) backfillCrawlCounters(crawlID int64) error {
 	if _, err := tx.Exec(
 		`UPDATE crawls SET
 			pages_count = ?, count_2xx = ?, count_3xx = ?, count_4xx = ?, count_5xx = ?,
-			count_errors = ?, count_blocked = ?, count_noindex = ?, max_depth = ?,
+			count_errors = ?, count_blocked = ?, count_noindex = ?, count_via_nofollow = ?, max_depth = ?,
 			duration_sum = ?, duration_n = ?, counters_ok = 1
 		 WHERE id = ?`,
-		pagesCount, c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, maxDepth, durSum, durN, crawlID,
+		pagesCount, c2xx, c3xx, c4xx, c5xx, cErr, cBlocked, cNoIndex, cViaNoFollow, maxDepth, durSum, durN, crawlID,
 	); err != nil {
 		return fmt.Errorf("store: backfill counters for crawl %d: %w", crawlID, err)
 	}

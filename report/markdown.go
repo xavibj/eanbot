@@ -35,6 +35,7 @@ var sampleHeadings = []struct{ key, label string }{
 	{"error", "Fallos de red"},
 	{"blocked", "Bloqueadas por robots"},
 	{"noindex", "noindex"},
+	{"via_nofollow", "Solo vía nofollow"},
 }
 
 // noData is what an empty section prints instead of an empty table.
@@ -209,6 +210,9 @@ func writeHeader(b *strings.Builder, r *Report) {
 	writeRow(b, "Errores", thousands(int64(s.Errors)))
 	writeRow(b, "Bloqueadas", thousands(int64(s.Blocked)))
 	writeRow(b, "noindex", thousands(int64(s.NoIndex)))
+	if configFollowsNoFollow(r.Crawl.Config) {
+		writeRow(b, "Solo vía nofollow", thousands(int64(s.ViaNoFollow)))
+	}
 	writeRow(b, "Profundidad máxima", thousands(int64(s.MaxDepth)))
 	writeRow(b, "Tiempo medio de respuesta", thousands(s.AvgDurationMs)+" ms")
 }
@@ -339,6 +343,17 @@ type configDoc struct {
 	IncludeSubdomains bool   `json:"include_subdomains"`
 	IgnoreRobots      bool   `json:"ignore_robots"`
 	UseSitemaps       *bool  `json:"use_sitemaps"`
+	FollowNoFollow    bool   `json:"follow_nofollow"`
+}
+
+// configFollowsNoFollow reports whether the stored crawl config had
+// follow_nofollow set, which gates the "Solo vía nofollow" summary row.
+func configFollowsNoFollow(raw json.RawMessage) bool {
+	var doc configDoc
+	if len(raw) == 0 || json.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	return doc.FollowNoFollow
 }
 
 // configSummary condenses the stored crawl config into one line.

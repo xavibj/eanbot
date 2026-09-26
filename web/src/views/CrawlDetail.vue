@@ -24,6 +24,7 @@ const STATUS_OPTIONS = [
   { value: '5xx', label: '5xx — error de servidor' },
   { value: 'error', label: 'Errores de red' },
   { value: 'blocked', label: 'Bloqueadas por robots' },
+  { value: 'via_nofollow', label: 'Solo vía nofollow' },
 ]
 
 const crawl = ref(null)
@@ -81,6 +82,8 @@ const headerNames = computed(() => {
   if (!raw || typeof raw !== 'object') return ''
   return Object.keys(raw).join(', ')
 })
+
+const followsNofollow = computed(() => !!config.value?.follow_nofollow)
 
 const originLabel = computed(() => String(config.value?.origin ?? '').trim())
 
@@ -328,6 +331,7 @@ onBeforeUnmount(() => {
           <span v-if="config.include_subdomains">subdominios incluidos</span>
           <span v-if="config.ignore_robots">robots.txt ignorado</span>
           <span v-if="config.use_sitemaps">sitemaps</span>
+          <span v-if="config.follow_nofollow">sigue nofollow</span>
           <span v-if="headerNames">cabeceras: {{ headerNames }}</span>
           <span v-if="originLabel">origen: {{ originLabel }}</span>
           <span v-if="config.insecure_tls">tls sin verificar</span>
@@ -356,7 +360,7 @@ onBeforeUnmount(() => {
         Error del rastreo: {{ crawl.error }}
       </div>
 
-      <SummaryCards :summary="summary" />
+      <SummaryCards :summary="summary" :show-via-nofollow="followsNofollow" />
       <p class="meta-line" style="margin-top: 8px" v-if="summary">
         <span>Profundidad máx.: {{ formatNumber(summary.max_depth) }}</span>
         <span>Tiempo medio: {{ formatMillis(summary.avg_duration_ms) }}</span>
@@ -448,6 +452,7 @@ onBeforeUnmount(() => {
                 <td><StatusCode :status="page.status" :blocked="page.blocked" /></td>
                 <td>
                   <span class="truncate mono" :title="page.url">{{ page.url }}</span>
+                  <span v-if="page.via_nofollow" class="pill" style="margin-left: 6px">nofollow</span>
                 </td>
                 <td>
                   <span class="truncate" :title="page.title">{{ orDash(page.title) }}</span>

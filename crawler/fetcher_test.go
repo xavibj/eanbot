@@ -35,6 +35,57 @@ func TestHTTPFetcherSendsUserAgent(t *testing.T) {
 	}
 }
 
+func TestHTTPFetcherXRobotsTagSingleHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	fetcher := NewHTTPFetcher("EANBot-Test/1.0", 5*time.Second, 1024)
+	resp, err := fetcher.Fetch(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if resp.XRobotsTag != "noindex, nofollow" {
+		t.Errorf("XRobotsTag = %q, want %q", resp.XRobotsTag, "noindex, nofollow")
+	}
+}
+
+func TestHTTPFetcherXRobotsTagMultipleHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("X-Robots-Tag", "googlebot: noindex")
+		w.Header().Add("X-Robots-Tag", "noarchive")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	fetcher := NewHTTPFetcher("EANBot-Test/1.0", 5*time.Second, 1024)
+	resp, err := fetcher.Fetch(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if resp.XRobotsTag != "googlebot: noindex, noarchive" {
+		t.Errorf("XRobotsTag = %q, want %q", resp.XRobotsTag, "googlebot: noindex, noarchive")
+	}
+}
+
+func TestHTTPFetcherXRobotsTagAbsentIsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	fetcher := NewHTTPFetcher("EANBot-Test/1.0", 5*time.Second, 1024)
+	resp, err := fetcher.Fetch(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if resp.XRobotsTag != "" {
+		t.Errorf("XRobotsTag = %q, want empty", resp.XRobotsTag)
+	}
+}
+
 func TestHTTPFetcherDoesNotFollowRedirects(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/target" {

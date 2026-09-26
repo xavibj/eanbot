@@ -251,6 +251,9 @@ func TestOpen_MigratesOldSchema(t *testing.T) {
 	if sum.AvgDurationMs != 103 { // (100+200+10)/3, integer division
 		t.Errorf("AvgDurationMs = %d, want 103", sum.AvgDurationMs)
 	}
+	if sum.ViaNoFollow != 0 {
+		t.Errorf("ViaNoFollow = %d, want 0 (old rows have no via_nofollow data)", sum.ViaNoFollow)
+	}
 
 	got, err := s.GetCrawl(crawlID)
 	if err != nil {
@@ -269,12 +272,30 @@ func TestOpen_MigratesOldSchema(t *testing.T) {
 	}
 
 	// AddPages (and hence AddPage) must keep working against the migrated
-	// schema: new columns and crawl_content_types must actually exist.
-	if _, err := s.AddPage(
-		Page{CrawlID: crawlID, URL: "https://example.com/new", Status: 200, ContentType: "text/html", FetchedAt: time.Now().UTC()},
+	// schema: new columns and crawl_content_types must actually exist,
+	// including the x_robots_tag/via_nofollow columns added to pages and
+	// count_via_nofollow added to crawls.
+	newID, err := s.AddPage(
+		Page{CrawlID: crawlID, URL: "https://example.com/new", Status: 200, ContentType: "text/html",
+			XRobotsTag: "nofollow", ViaNoFollow: true, FetchedAt: time.Now().UTC()},
 		nil,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("AddPage() after migration error = %v", err)
+	}
+	detail, err := s.GetPage(crawlID, newID)
+	if err != nil {
+		t.Fatalf("GetPage() after migration error = %v", err)
+	}
+	if detail.Page.XRobotsTag != "nofollow" || !detail.Page.ViaNoFollow {
+		t.Errorf("page after migration = %+v, want XRobotsTag=nofollow ViaNoFollow=true", detail.Page)
+	}
+	sum2, err := s.Summarize(crawlID)
+	if err != nil {
+		t.Fatalf("Summarize() after migration error = %v", err)
+	}
+	if sum2.ViaNoFollow != 1 {
+		t.Errorf("ViaNoFollow after migration = %d, want 1", sum2.ViaNoFollow)
 	}
 }
 
@@ -603,6 +624,185 @@ func TestAddPages_UpdatesCountersAndContentTypes(t *testing.T) {
 	}
 	if len(detail.Outlinks) != 1 || detail.Outlinks[0].ToURL != "https://example.com/b" {
 		t.Errorf("Outlinks = %+v, want one link to /b", detail.Outlinks)
+	}
+}
+
+// TestAddPages_XRobotsTagAndViaNoFollow checks that AddPages persists the
+// new x_robots_tag/via_nofollow columns (round-tripped via GetPage) and
+// updates the crawls.count_via_nofollow counter Summarize reports.
+func TestAddPages_XRobotsTagAndViaNoFollow(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	batch := []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, XRobotsTag: "noindex", ViaNoFollow: true, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/b", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+	}
+	ids, err := s.AddPages(c.ID, batch)
+	if err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+
+	detail, err := s.GetPage(c.ID, ids[1])
+	if err != nil {
+		t.Fatalf("GetPage() error = %v", err)
+	}
+	if detail.Page.XRobotsTag != "noindex" {
+		t.Errorf("XRobotsTag = %q, want %q", detail.Page.XRobotsTag, "noindex")
+	}
+	if !detail.Page.ViaNoFollow {
+		t.Error("ViaNoFollow = false, want true")
+	}
+
+	home, err := s.GetPage(c.ID, ids[0])
+	if err != nil {
+		t.Fatalf("GetPage() error = %v", err)
+	}
+	if home.Page.ViaNoFollow {
+		t.Error("the seed page must not be ViaNoFollow")
+	}
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.ViaNoFollow != 2 {
+		t.Errorf("Summary.ViaNoFollow = %d, want 2", sum.ViaNoFollow)
+	}
+
+	// A second batch must accumulate the counter rather than replace it.
+	if _, err := s.AddPages(c.ID, []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/c", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+	}); err != nil {
+		t.Fatalf("AddPages() second batch error = %v", err)
+	}
+	sum, err = s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.ViaNoFollow != 3 {
+		t.Errorf("Summary.ViaNoFollow after second batch = %d, want 3", sum.ViaNoFollow)
+	}
+}
+
+// TestRecomputeViaNoFollow_ClearsPagesWithAFollowableInlink checks that a
+// page marked via_nofollow (the crawl engine's overapproximation under
+// concurrency, per specs/002-crawler.md) gets cleared once it turns out to
+// also have a normal (non-nofollow) inlink from a non-nofollow page, that a
+// page whose every inlink is nofollow (or comes from a nofollow page) keeps
+// its mark, and that count_via_nofollow is adjusted accordingly.
+func TestRecomputeViaNoFollow_ClearsPagesWithAFollowableInlink(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	// /shared: marked via_nofollow, but /normal links to it normally -> must
+	// be cleared.
+	// /nofollow-only: marked via_nofollow, and every inlink to it is either
+	// a nofollow link or comes from a nofollow page -> must stay marked.
+	ids, err := s.AddPages(c.ID, []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/normal", Status: 200, FetchedAt: now},
+			Links: []Link{{ToURL: "https://example.com/shared", NoFollow: false, InScope: true}}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/nofollow-page", Status: 200, NoFollow: true, FetchedAt: now},
+			Links: []Link{{ToURL: "https://example.com/nofollow-only", NoFollow: false, InScope: true}}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/other", Status: 200, FetchedAt: now},
+			Links: []Link{{ToURL: "https://example.com/nofollow-only", NoFollow: true, InScope: true}}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/shared", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/nofollow-only", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+	})
+	if err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+	_ = ids
+
+	sum, err := s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.ViaNoFollow != 2 {
+		t.Fatalf("ViaNoFollow before recompute = %d, want 2", sum.ViaNoFollow)
+	}
+
+	cleared, err := s.RecomputeViaNoFollow(c.ID)
+	if err != nil {
+		t.Fatalf("RecomputeViaNoFollow() error = %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared = %d, want 1", cleared)
+	}
+
+	shared, err := s.FindPageByURL(c.ID, "https://example.com/shared")
+	if err != nil {
+		t.Fatalf("FindPageByURL(/shared) error = %v", err)
+	}
+	if shared.ViaNoFollow {
+		t.Error("/shared should have been cleared: it has a normal inlink from a non-nofollow page")
+	}
+
+	nfOnly, err := s.FindPageByURL(c.ID, "https://example.com/nofollow-only")
+	if err != nil {
+		t.Fatalf("FindPageByURL(/nofollow-only) error = %v", err)
+	}
+	if !nfOnly.ViaNoFollow {
+		t.Error("/nofollow-only should keep its mark: every inlink is nofollow or from a nofollow page")
+	}
+
+	sum, err = s.Summarize(c.ID)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if sum.ViaNoFollow != 1 {
+		t.Errorf("ViaNoFollow after recompute = %d, want 1", sum.ViaNoFollow)
+	}
+
+	// Idempotent: running it again clears nothing more.
+	cleared, err = s.RecomputeViaNoFollow(c.ID)
+	if err != nil {
+		t.Fatalf("RecomputeViaNoFollow() second call error = %v", err)
+	}
+	if cleared != 0 {
+		t.Errorf("second cleared = %d, want 0", cleared)
+	}
+}
+
+func TestRecomputeViaNoFollow_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.RecomputeViaNoFollow(999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RecomputeViaNoFollow() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestListPages_ViaNoFollowFilter checks the "via_nofollow" PageFilter.Status
+// value: WHERE via_nofollow = 1, with the total taken from the
+// count_via_nofollow counter (per "Contadores" in specs/003-store.md).
+func TestListPages_ViaNoFollowFilter(t *testing.T) {
+	s := openTestStore(t)
+	c := mustCreateCrawl(t, s, "https://example.com")
+	now := time.Now().UTC()
+
+	batch := []PageWithLinks{
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/", Status: 200, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/a", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+		{Page: Page{CrawlID: c.ID, URL: "https://example.com/b", Status: 200, ViaNoFollow: true, FetchedAt: now}},
+	}
+	if _, err := s.AddPages(c.ID, batch); err != nil {
+		t.Fatalf("AddPages() error = %v", err)
+	}
+
+	got, total, err := s.ListPages(c.ID, PageFilter{Status: "via_nofollow"})
+	if err != nil {
+		t.Fatalf("ListPages() error = %v", err)
+	}
+	if total != 2 || len(got) != 2 {
+		t.Fatalf("total=%d len=%d, want 2", total, len(got))
+	}
+	for _, p := range got {
+		if !p.ViaNoFollow {
+			t.Errorf("page %s returned by via_nofollow filter has ViaNoFollow=false", p.URL)
+		}
 	}
 }
 

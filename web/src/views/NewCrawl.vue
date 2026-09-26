@@ -15,6 +15,7 @@ const form = reactive({
   include_subdomains: false,
   ignore_robots: false,
   use_sitemaps: true,
+  follow_nofollow: false,
   headers: '',
   origin: '',
   insecure_tls: false,
@@ -85,6 +86,7 @@ function buildBody(headers) {
   body.include_subdomains = !!form.include_subdomains
   body.ignore_robots = !!form.ignore_robots
   body.use_sitemaps = !!form.use_sitemaps
+  body.follow_nofollow = !!form.follow_nofollow
   const origin = String(form.origin ?? '').trim()
   if (origin !== '') body.origin = origin
   body.insecure_tls = !!form.insecure_tls
@@ -233,6 +235,16 @@ async function onSubmit() {
           />
           Usar sitemaps
         </label>
+        <label class="check">
+          <input
+            type="checkbox"
+            :checked="form.follow_nofollow"
+            :disabled="sending"
+            @change="setBool('follow_nofollow', $event)"
+          />
+          Seguir enlaces nofollow
+        </label>
+        <span class="hint">Googlebot los trata como pista; para auditar todo lo enlazado.</span>
       </div>
 
       <div class="field field--wide" style="margin-top: 16px">

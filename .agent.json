@@ -1,0 +1,8 @@
+{
+  "name": "eanbot",
+  "tool": "claude",
+  "why": "Rastreador web tipo Googlebot en Go + Vue 3, desarrollo con SDD",
+  "host": "ns3267710",
+  "dir": "/home/claude/Projects/eanbot",
+  "started": "2026-09-16T22:29:28+02:00"
+}

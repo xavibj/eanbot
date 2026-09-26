@@ -60,7 +60,7 @@ func cmdCrawls(args []string, stdout, stderr io.Writer) int {
 func cmdPages(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("pages", stderr)
 	dbPath := fs.String("db", "eanbot.db", "ruta de la base de datos SQLite")
-	status := fs.String("status", "", "filtrar por estado: 2xx|3xx|4xx|5xx|error|blocked")
+	status := fs.String("status", "", "filtrar por estado: 2xx|3xx|4xx|5xx|error|blocked|via_nofollow")
 	query := fs.String("q", "", "filtrar por texto en la URL o el título")
 	jsonOutput := fs.Bool("json", false, "imprimir el resultado en JSON")
 
@@ -105,11 +105,20 @@ func cmdPages(args []string, stdout, stderr io.Writer) int {
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "CÓDIGO\tTIPO\tPROF.\tURL\tTÍTULO")
+	fmt.Fprintln(tw, "CÓDIGO\tTIPO\tPROF.\tVÍA\tURL\tTÍTULO")
 	for _, p := range pages {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", storePageCode(p), p.ContentType, p.Depth, p.URL, p.Title)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", storePageCode(p), p.ContentType, p.Depth, viaColumn(p), p.URL, p.Title)
 	}
 	return flushTabwriter(tw, stderr)
+}
+
+// viaColumn is the "VÍA" column of "eanbot pages": "nofollow" for a page
+// discovered only through nofollow links, "" otherwise.
+func viaColumn(p store.Page) string {
+	if p.ViaNoFollow {
+		return "nofollow"
+	}
+	return ""
 }
 
 // brokenBatchSize is how many broken pages cmdBroken fetches from the store
