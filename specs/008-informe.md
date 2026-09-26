@@ -42,7 +42,6 @@ type Bucket struct {
     Errors  int    `json:"errors"`
     Blocked int    `json:"blocked"`
     NoIndex int    `json:"noindex"`
-    ViaNoFollow int `json:"via_nofollow"`
     AvgMs   int64  `json:"avg_ms"`   // media entera sobre status > 0; 0 si no hay
 }
 type StatusCount struct{ Status string `json:"status"`; N int `json:"n"` }

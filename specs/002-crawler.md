@@ -275,7 +275,11 @@ sí misma; el motor la protege con un mutex.
    (`Frontier.Push` devuelve false pero el motor llama a
    `Frontier.ClearNoFollow(url)`). Al visitarla, `Page.ViaNoFollow` refleja la
    marca y `Stats.ViaNoFollow` la cuenta. Las URLs de la semilla, de sitemaps
-   y de redirecciones nunca son «vía nofollow». Condición anterior (para
+   y de redirecciones nunca son «vía nofollow». Con `Concurrency > 1` la marca
+   es una **sobreaproximación**: si un worker visita la URL antes de que otro
+   procese el enlace normal, queda marcada aunque tenga un enlace seguible. El
+   valor exacto lo fija `store.RecomputeViaNoFollow` al terminar el rastreo
+   (spec 003); `Stats.ViaNoFollow` es el recuento de rastreo, no el definitivo. Condición anterior (para
    contexto): «en ámbito, no nofollow, y `p.NoFollow == false`, con
    `p.Depth+1 <= MaxDepth` → Push(depth+1). `RedirectTo` en ámbito →
    Push(misma profundidad). `Canonical` no se encola.

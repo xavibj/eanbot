@@ -211,6 +211,7 @@ func (s *Store) AddPage(p Page, links []Link) (int64, error)           // = AddP
 func (s *Store) AddPages(crawlID int64, batch []PageWithLinks) ([]int64, error) // UNA transacción: inserta páginas y links, actualiza pages_count, contadores y crawl_content_types; URL duplicada → error y rollback de todo el lote
 func (s *Store) ForEachPage(ctx context.Context, crawlID int64, fn func(Page) error) error // streaming por id (spec 008)
 func (s *Store) BrokenReferrerCounts(crawlID int64, limit int) ([]BrokenPage, int, error) // spec 008
+func (s *Store) RecomputeViaNoFollow(crawlID int64) (cleared int, err error) // pone via_nofollow = 0 en las páginas marcadas que tienen al menos un inlink seguible (link.nofollow = 0 y página origen con nofollow = 0); ajusta count_via_nofollow; una consulta por página marcada (índice links_crawl_to + join con pages); devuelve cuántas se han limpiado
 func (s *Store) Checkpoint(mode string) error                          // PRAGMA wal_checkpoint(mode): PASSIVE|FULL|RESTART|TRUNCATE, sobre el pool de escritura
 func NewBatchWriter(s *Store, crawlID int64, maxItems int, maxDelay time.Duration) *BatchWriter
 func (b *BatchWriter) Add(p Page, links []Link)   // encola; vuelca cuando hay maxItems o han pasado maxDelay desde el primer elemento pendiente
@@ -296,7 +297,7 @@ los contadores correctos con `counters_ok = 1`; AddPages en lote actualiza
 `pages_count`, contadores y content types, y una URL duplicada en el lote
 revierte el lote entero; Summarize coincide con un recuento directo sobre
 `pages` tras varios lotes; ListPages `total` por contadores para cada `Status`
-y por COUNT con `Query`; BatchWriter vuelca por `maxItems`, por `maxDelay`
+y por COUNT con `Query`; RecomputeViaNoFollow limpia una página marcada con un inlink normal desde una página sin nofollow, conserva la marca si todos sus inlinks son nofollow o vienen de páginas nofollow, y ajusta `count_via_nofollow`; BatchWriter vuelca por `maxItems`, por `maxDelay`
 (test con `maxDelay` de 50 ms y espera), en `Close`, y expone el error de un
 volcado fallido (crawl inexistente); Checkpoint("TRUNCATE") deja el fichero
 `-wal` a 0 bytes tras escribir; AddPage incrementa `pages_count` y rechaza URL

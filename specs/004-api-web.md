@@ -23,7 +23,7 @@ Dentro de `server`: `Manager` con `Start(cfg crawler.Config) (crawlID, error)`,
 `Cancel(id) bool`, `Running() []int64`. Por cada rastreo: `store.CreateCrawl`
 (config serializada como el objeto `config` de abajo), goroutine que llama a
 `crawler.Run` con un `context.WithCancel`, un `Sink` que hace
-`store.BatchWriter` (`NewBatchWriter(st, id, 100, time.Second)`, convirtiendo tipos; los errores de volcado se registran en el log), `Close()` del writer al terminar `crawler.Run` y, después, `store.FinishCrawl` con
+`store.BatchWriter` (`NewBatchWriter(st, id, 100, time.Second)`, convirtiendo tipos; los errores de volcado se registran en el log), `Close()` del writer al terminar `crawler.Run`, después `store.RecomputeViaNoFollow` si el config tiene `follow_nofollow` (el resultado se registra en el log), y por último `store.FinishCrawl` con
 `done` (sin error), `cancelled` (ctx cancelado) o `failed` (otro error, texto en
 `error`). `Stats.RobotsTxt` se guarda con `SetRobots` en cuanto se conoce
 (el Sink puede recibirlo tras la primera página: el Manager lo guarda al
